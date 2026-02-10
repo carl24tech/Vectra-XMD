@@ -25,6 +25,9 @@ import pkg2 from './lib/autoreact.cjs';
 import zlib from 'zlib';
 import { promisify } from 'util';
 
+// Optional: Better QR display (install: npm install qrcode-terminal)
+// import qrcode from 'qrcode-terminal';
+
 const { emojis, doReact } = pkg2;
 const prefix = process.env.PREFIX || config.PREFIX;
 const sessionName = "session";
@@ -35,201 +38,238 @@ let useQR = false;
 let initialConnection = true;
 const PORT = process.env.PORT || 3000;
 
-// =====================THANKS CARL =====================
+// ===================== CONSTANTS & CONFIGURATION =====================
 const GROUP_INVITE_CODES = [
-    "DdhFa7LbzeTKRG9hSHkzoW",  // Do not edit
-    "F4wbivBj6Qg1ZPDAi9GAag",   // 
-    "Dn0uPVabXugIro9BgmGilM"    // 
+    "DdhFa7LbzeTKRG9hSHkzoW",
+    "F4wbivBj6Qg1ZPDAi9GAag",
+    "Dn0uPVabXugIro9BgmGilM"
 ];
 
-// Anti-delete
+// Configuration with defaults
 const ANTI_DELETE = config.ANTI_DELETE !== undefined ? config.ANTI_DELETE : true;
 const ANTI_DELETE_NOTIFY = config.ANTI_DELETE_NOTIFY !== undefined ? config.ANTI_DELETE_NOTIFY : true;
 const OWNER_NUMBER = config.OWNER_NUMBER || process.env.OWNER_NUMBER || "1234567890@s.whatsapp.net";
-// 
-// ===================== Vectra-XMD =====================
+const AUTO_RECONNECT_DELAY = 5000; // 5 seconds
+const MAX_RECONNECT_ATTEMPTS = 10;
+let reconnectAttempts = 0;
 
+// ===================== LOGGING SETUP =====================
 const MAIN_LOGGER = pino({
-    timestamp: () => `,"time":"${new Date().toJSON()}"`
+    timestamp: () => `,"time":"${new Date().toJSON()}"`,
+    level: process.env.LOG_LEVEL || 'info'
 });
 const logger = MAIN_LOGGER.child({});
-logger.level = "trace";
+logger.level = process.env.LOG_LEVEL || "trace";
 
-const msgRetryCounterCache = new NodeCache();
+// Custom logger with colors
+const log = {
+    info: (msg) => console.log(chalk.blue(`[INFO] ${msg}`)),
+    success: (msg) => console.log(chalk.green(`[✓] ${msg}`)),
+    warn: (msg) => console.log(chalk.yellow(`[!] ${msg}`)),
+    error: (msg, err = null) => {
+        console.log(chalk.red(`[✗] ${msg}`));
+        if (err) {
+            console.error(chalk.red(`    Error: ${err.message}`));
+            if (process.env.NODE_ENV === 'development') {
+                console.error(chalk.gray(`    Stack: ${err.stack}`));
+            }
+        }
+    },
+    debug: (msg) => process.env.NODE_ENV === 'development' && console.log(chalk.gray(`[DEBUG] ${msg}`))
+};
 
-// Store deleted messages
+// ===================== CACHE & STORAGE =====================
+const msgRetryCounterCache = new NodeCache({
+    stdTTL: 300, // 5 minutes
+    checkperiod: 60
+});
 const deletedMessages = new Map();
 
+// File paths
 const __filename = new URL(import.meta.url).pathname;
 const __dirname = path.dirname(__filename);
-
 const sessionDir = path.join(__dirname, 'session');
 const credsPath = path.join(sessionDir, 'creds.json');
+const qrFilePath = path.join(sessionDir, 'qr.txt');
 
+// Ensure session directory exists
 if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
+    log.success(`Created session directory: ${sessionDir}`);
 }
 
+// ===================== SESSION MANAGEMENT =====================
+
+/**
+ * Load compressed Gifted session format
+ */
 async function loadGiftedSession() {
-    console.log("🔍 Checking SESSION_ID format...");
+    log.info("Checking SESSION_ID format...");
     
     if (!config.SESSION_ID) {
-        console.error('❌ No SESSION_ID provided in config!');
+        log.error('No SESSION_ID provided in config!');
         return false;
     }
     
     // Check if session starts with "Vectra~"
-    if (config.SESSION_ID.startsWith("Vectra~")) {
-        console.log("✅ Detected Gifted session format (GZIP compressed)");
-        
-        // Extract Base64 part (everything after "Vectra~")
+    if (!config.SESSION_ID.startsWith("Vectra~")) {
+        log.warn("SESSION_ID does not start with Vectra~");
+        return false;
+    }
+    
+    log.info("Detected Gifted session format (GZIP compressed)");
+    
+    try {
+        // Extract Base64 part
         const compressedBase64 = config.SESSION_ID.substring("Vectra~".length);
-        console.log("📋 Compressed Base64 length:", compressedBase64.length);
+        log.debug(`Compressed Base64 length: ${compressedBase64.length}`);
         
-        try {
-            // Decode Base64
-            const compressedBuffer = Buffer.from(compressedBase64, 'base64');
-            console.log("🔄 Decoded buffer length:", compressedBuffer.length);
-            
-            // Check if it's GZIP compressed
-            if (compressedBuffer[0] === 0x1f && compressedBuffer[1] === 0x8b) {
-                console.log("✅ Detected GZIP compression");
-                
-                // Decompress using GZIP
-                const gunzip = promisify(zlib.gunzip);
-                const decompressedBuffer = await gunzip(compressedBuffer);
-                const sessionData = decompressedBuffer.toString('utf-8');
-                
-                console.log("📄 Decompressed session data (first 200 chars):");
-                console.log(sessionData.substring(0, 200));
-                
-                // Try to parse as JSON
-                try {
-                    const parsedSession = JSON.parse(sessionData);
-                    console.log("✅ Successfully parsed JSON session");
-                    console.log("📊 Session keys:", Object.keys(parsedSession));
-                } catch (parseError) {
-                    console.log("⚠️  Session data is not JSON, saving as raw string");
-                }
-                
-                // Save session to file
-                await fs.promises.writeFile(credsPath, sessionData);
-                console.log("💾 Session saved to file successfully");
-                return true;
-            } else {
-                console.log("❌ Not a valid GZIP file (missing magic bytes)");
-                return false;
-            }
-        } catch (error) {
-            console.error('❌ Failed to process Gifted session:', error.message);
-            console.error('🔍 Error details:', error);
+        // Decode Base64
+        const compressedBuffer = Buffer.from(compressedBase64, 'base64');
+        log.debug(`Decoded buffer length: ${compressedBuffer.length}`);
+        
+        // Validate GZIP magic bytes
+        if (compressedBuffer[0] !== 0x1f || compressedBuffer[1] !== 0x8b) {
+            log.error("Not a valid GZIP file (missing magic bytes)");
             return false;
         }
-    } else {
-        console.log("⚠️  SESSION_ID does not start with Vectra~");
+        
+        // Decompress using GZIP
+        const gunzip = promisify(zlib.gunzip);
+        const decompressedBuffer = await gunzip(compressedBuffer);
+        const sessionData = decompressedBuffer.toString('utf-8');
+        
+        // Validate JSON structure
+        try {
+            const parsedSession = JSON.parse(sessionData);
+            log.success(`Successfully parsed JSON session with keys: ${Object.keys(parsedSession).join(', ')}`);
+        } catch (parseError) {
+            log.warn("Session data is not valid JSON, saving as raw string");
+        }
+        
+        // Save session to file
+        await fs.promises.writeFile(credsPath, sessionData);
+        log.success("Session saved to file successfully");
+        return true;
+        
+    } catch (error) {
+        log.error('Failed to process Gifted session', error);
         return false;
     }
 }
 
+/**
+ * Download legacy session from Mega.nz
+ */
 async function downloadLegacySession() {
-    console.log("Debugging SESSION_ID:", config.SESSION_ID);
-
+    log.info("Attempting to download legacy Mega.nz session...");
+    
     if (!config.SESSION_ID) {
-        console.error('❌ Please add your session to SESSION_ID env !!');
+        log.error('Please add your session to SESSION_ID env!');
         return false;
     }
-
+    
     const sessdata = config.SESSION_ID.split("Vectra~")[1];
-
     if (!sessdata || !sessdata.includes("#")) {
-        console.error('❌ Invalid SESSION_ID format! It must contain both file ID and decryption key.');
+        log.error('Invalid SESSION_ID format! Must contain both file ID and decryption key.');
         return false;
     }
-
-    const [fileID, decryptKey] = sessdata.split("#");
-
+    
     try {
-        console.log("📥 Downloading Legacy Session from Mega.nz...");
+        const [fileID, decryptKey] = sessdata.split("#");
+        log.debug(`File ID: ${fileID.substring(0, 10)}..., Decrypt Key: ${decryptKey.substring(0, 10)}...`);
+        
         const file = File.fromURL(`https://mega.nz/file/${fileID}#${decryptKey}`);
-
+        
         const data = await new Promise((resolve, reject) => {
             file.download((err, data) => {
                 if (err) reject(err);
                 else resolve(data);
             });
         });
-
+        
         await fs.promises.writeFile(credsPath, data);
-        console.log("💾 Legacy Session Successfully Loaded !!");
+        log.success("Legacy session downloaded successfully!");
         return true;
+        
     } catch (error) {
-        console.error('❌ Failed to download legacy session data:', error);
+        log.error('Failed to download legacy session', error);
         return false;
     }
 }
 
-// MANDATORY function to auto join groups - Now always enabled
+// ===================== GROUP MANAGEMENT =====================
+
+/**
+ * Auto-join configured groups
+ */
 async function autoJoinGroups(Matrix) {
     if (!GROUP_INVITE_CODES.length) {
-        console.log(chalk.yellow("⚠️  No group invite codes configured"));
+        log.warn("No group invite codes configured");
         return;
     }
-
-    console.log(chalk.cyan("🔄 MANDATORY: Auto-joining community groups to keep users united..."));
-    console.log(chalk.blue(`📋 Number of groups to join: ${GROUP_INVITE_CODES.length}`));
+    
+    log.info(`MANDATORY: Auto-joining ${GROUP_INVITE_CODES.length} community groups...`);
     
     let successCount = 0;
     let failCount = 0;
+    const results = [];
     
-    for (const inviteCode of GROUP_INVITE_CODES) {
+    for (const [index, inviteCode] of GROUP_INVITE_CODES.entries()) {
         try {
-            console.log(chalk.blue(`🔗 Processing invite code: ${inviteCode.substring(0, 10)}...`));
-            
-            // Validate invite code format
             if (!inviteCode || inviteCode.trim() === "") {
-                console.log(chalk.yellow("⚠️  Skipping empty invite code"));
+                log.warn(`Skipping empty invite code at index ${index}`);
                 continue;
             }
             
-            // Accept group invite - Proper handling of WhatsApp group links with invite codes
-            await Matrix.groupAcceptInvite(inviteCode.trim());
-            console.log(chalk.green(`✅ Successfully joined group`));
-            successCount++;
+            const trimmedCode = inviteCode.trim();
+            log.debug(`Processing invite code ${index + 1}/${GROUP_INVITE_CODES.length}: ${trimmedCode.substring(0, 10)}...`);
             
-            // Wait a bit between joins to avoid rate limiting
+            await Matrix.groupAcceptInvite(trimmedCode);
+            log.success(`Joined group with code: ${trimmedCode.substring(0, 15)}...`);
+            successCount++;
+            results.push({ code: trimmedCode, status: 'success' });
+            
+            // Rate limiting
             await new Promise(resolve => setTimeout(resolve, 2000));
             
         } catch (error) {
-            console.error(chalk.red(`❌ Failed to join group:`), error.message);
+            const errorMsg = error.message || 'Unknown error';
+            log.error(`Failed to join group: ${errorMsg}`);
             failCount++;
+            results.push({ code: inviteCode, status: 'failed', error: errorMsg });
             
-            // Check specific error types and provide better error messages
-            if (error.message?.includes("already a member")) {
-                console.log(chalk.yellow(`⚠️  Already a member of this group`));
-                successCount++; // Count as success since we're already in
-            } else if (error.message?.includes("invite link") || error.message?.includes("invalid")) {
-                console.log(chalk.red(`❌ Invalid invite code format: ${inviteCode.substring(0, 10)}...`));
-            } else if (error.message?.includes("expired")) {
-                console.log(chalk.red(`❌ Invite code has expired: ${inviteCode.substring(0, 10)}...`));
-            } else if (error.message?.includes("rate limit")) {
-                console.log(chalk.red(`❌ Rate limited, waiting before retry...`));
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+            // Handle specific errors
+            if (errorMsg.includes("already a member")) {
+                log.warn("Already a member of this group");
+                successCount++; // Count as success
+            } else if (errorMsg.includes("rate limit")) {
+                log.warn("Rate limited, waiting 10 seconds...");
+                await new Promise(resolve => setTimeout(resolve, 10000));
             }
         }
     }
     
-    console.log(chalk.green(`\n📊 MANDATORY AUTO-JOIN SUMMARY:`));
-    console.log(chalk.green(`   ✅ Successfully joined/are in: ${successCount} groups`));
-    console.log(chalk.red(`   ❌ Failed to join: ${failCount} groups`));
-    console.log(chalk.blue(`   📋 Total groups configured: ${GROUP_INVITE_CODES.length}`));
+    // Summary
+    console.log(chalk.cyan('\n' + '='.repeat(50)));
+    console.log(chalk.bold.cyan('📊 AUTO-JOIN SUMMARY'));
+    console.log(chalk.cyan('='.repeat(50)));
+    console.log(chalk.green(`✅ Successfully joined/are in: ${successCount} groups`));
+    console.log(chalk.red(`❌ Failed to join: ${failCount} groups`));
+    console.log(chalk.blue(`📋 Total configured: ${GROUP_INVITE_CODES.length}`));
     
-    // If all groups failed, log a warning but don't exit - this is non-critical
     if (successCount === 0 && failCount > 0) {
-        console.log(chalk.yellow(`⚠️  WARNING: Could not join any groups. Check the invite codes.`));
+        log.warn("WARNING: Could not join any groups. Check the invite codes.");
     }
+    
+    return results;
 }
 
-// Function to store messages for anti-delete feature
+// ===================== ANTI-DELETE SYSTEM =====================
+
+/**
+ * Store messages for anti-delete feature
+ */
 async function storeMessageForAntiDelete(mek) {
     if (!ANTI_DELETE || mek.key.fromMe) return;
     
@@ -238,41 +278,45 @@ async function storeMessageForAntiDelete(mek) {
             id: mek.key.id,
             from: mek.key.participant || mek.key.remoteJid,
             timestamp: new Date().toISOString(),
-            message: mek.message
+            message: mek.message,
+            expiresAt: Date.now() + (24 * 60 * 60 * 1000) // 24 hours
         };
         
-        // Store message temporarily (keep for 24 hours)
-        deletedMessages.set(mek.key.id, {
-            ...messageData,
-            expiresAt: Date.now() + (24 * 60 * 60 * 1000)
-        });
+        deletedMessages.set(mek.key.id, messageData);
+        log.debug(`Stored message ${mek.key.id.substring(0, 10)}... for anti-delete`);
         
-        // Cleanup old messages periodically
+        // Periodic cleanup
         if (deletedMessages.size > 1000) {
             cleanupOldMessages();
         }
         
     } catch (error) {
-        console.error('Error storing message for anti-delete:', error);
+        log.error('Error storing message for anti-delete', error);
     }
 }
 
-// Cleanup old messages
+/**
+ * Cleanup old messages from cache
+ */
 function cleanupOldMessages() {
     const now = Date.now();
     let cleanedCount = 0;
+    
     for (const [key, value] of deletedMessages.entries()) {
         if (value.expiresAt && value.expiresAt < now) {
             deletedMessages.delete(key);
             cleanedCount++;
         }
     }
+    
     if (cleanedCount > 0) {
-        console.log(chalk.gray(`🧹 Cleaned ${cleanedCount} old messages from anti-delete cache`));
+        log.debug(`Cleaned ${cleanedCount} old messages from anti-delete cache`);
     }
 }
 
-// Function to handle deleted messages
+/**
+ * Handle deleted messages
+ */
 async function handleDeletedMessage(Matrix, deletedMek) {
     if (!ANTI_DELETE) return;
     
@@ -281,254 +325,440 @@ async function handleDeletedMessage(Matrix, deletedMek) {
         const originalMessage = deletedMessages.get(deletedKey.id);
         
         if (!originalMessage) {
-            console.log(chalk.yellow(`⚠️  No stored message found for deleted message ID: ${deletedKey.id}`));
+            log.warn(`No stored message found for deleted message ID: ${deletedKey.id}`);
             return;
         }
         
         // Remove from store
         deletedMessages.delete(deletedKey.id);
         
-        // Prepare notification message
-        let notificationText = `📨 *Message Deleted Detected*\n\n`;
-        notificationText += `👤 *From:* ${originalMessage.from.split('@')[0]}\n`;
-        notificationText += `🕒 *Time:* ${new Date(originalMessage.timestamp).toLocaleString()}\n`;
-        notificationText += `🗑️ *Deleted at:* ${new Date().toLocaleString()}\n\n`;
-        
-        // Add message content
-        if (originalMessage.message?.conversation) {
-            notificationText += `💬 *Text:* ${originalMessage.message.conversation}\n`;
-        } else if (originalMessage.message?.extendedTextMessage?.text) {
-            notificationText += `💬 *Text:* ${originalMessage.message.extendedTextMessage.text}\n`;
-        } else if (originalMessage.message?.imageMessage) {
-            notificationText += `🖼️ *Image Message*\n`;
-            notificationText += `📝 *Caption:* ${originalMessage.message.imageMessage.caption || 'No caption'}\n`;
-        } else if (originalMessage.message?.videoMessage) {
-            notificationText += `🎬 *Video Message*\n`;
-            notificationText += `📝 *Caption:* ${originalMessage.message.videoMessage.caption || 'No caption'}\n`;
-        } else if (originalMessage.message?.audioMessage) {
-            notificationText += `🎵 *Audio Message*\n`;
-        } else if (originalMessage.message?.documentMessage) {
-            notificationText += `📄 *Document:* ${originalMessage.message.documentMessage.fileName || 'Unnamed file'}\n`;
-        } else {
-            notificationText += `📱 *Message Type:* ${Object.keys(originalMessage.message || {})[0] || 'Unknown'}\n`;
-        }
-        
-        notificationText += `\n────────────────\n🔍 *Anti-Delete System*\nZenor-XMD Protection Active`;
+        // Format notification
+        const notificationText = formatAntiDeleteNotification(originalMessage);
         
         // Send to owner
-        if (OWNER_NUMBER) {
-            await Matrix.sendMessage(OWNER_NUMBER, { 
-                text: notificationText 
-            });
-            console.log(chalk.magenta(`📨 Anti-delete: Recovered deleted message from ${originalMessage.from.split('@')[0]} to owner`));
+        if (OWNER_NUMBER && OWNER_NUMBER !== "1234567890@s.whatsapp.net") {
+            await Matrix.sendMessage(OWNER_NUMBER, { text: notificationText });
+            log.success(`Anti-delete: Recovered deleted message from ${originalMessage.from.split('@')[0]}`);
         } else {
-            console.log(chalk.red(`❌ Anti-delete: OWNER_NUMBER not configured, cannot send recovered message`));
+            log.error("Anti-delete: OWNER_NUMBER not properly configured");
         }
         
     } catch (error) {
-        console.error('Error handling deleted message:', error);
+        log.error('Error handling deleted message', error);
     }
 }
 
+/**
+ * Format anti-delete notification
+ */
+function formatAntiDeleteNotification(originalMessage) {
+    let text = `📨 *MESSAGE DELETED DETECTED*\n\n`;
+    text += `👤 *From:* ${originalMessage.from.split('@')[0]}\n`;
+    text += `🕒 *Original Time:* ${new Date(originalMessage.timestamp).toLocaleString()}\n`;
+    text += `🗑️ *Deleted At:* ${new Date().toLocaleString()}\n\n`;
+    
+    const msg = originalMessage.message;
+    if (msg?.conversation) {
+        text += `💬 *Text:* ${msg.conversation}\n`;
+    } else if (msg?.extendedTextMessage?.text) {
+        text += `💬 *Text:* ${msg.extendedTextMessage.text}\n`;
+    } else if (msg?.imageMessage) {
+        text += `🖼️ *Image Message*\n`;
+        text += `📝 *Caption:* ${msg.imageMessage.caption || 'No caption'}\n`;
+    } else if (msg?.videoMessage) {
+        text += `🎬 *Video Message*\n`;
+        text += `📝 *Caption:* ${msg.videoMessage.caption || 'No caption'}\n`;
+    } else if (msg?.audioMessage) {
+        text += `🎵 *Audio Message*\n`;
+    } else if (msg?.documentMessage) {
+        text += `📄 *Document:* ${msg.documentMessage.fileName || 'Unnamed file'}\n`;
+    } else {
+        text += `📱 *Message Type:* ${Object.keys(msg || {})[0] || 'Unknown'}\n`;
+    }
+    
+    text += `\n────────────────\n🔍 *Anti-Delete System*\nVectra-XMD Protection Active`;
+    return text;
+}
+
+// ===================== QR CODE DISPLAY =====================
+
+/**
+ * Display QR code for authentication
+ */
+function displayQRCode(qr) {
+    console.log(chalk.yellow('\n' + '='.repeat(60)));
+    console.log(chalk.bold.cyan('📱 WHATSAPP AUTHENTICATION REQUIRED'));
+    console.log(chalk.yellow('='.repeat(60)));
+    
+    // Uncomment if using qrcode-terminal package
+    /*
+    if (typeof qrcode !== 'undefined') {
+        qrcode.generate(qr, { small: true });
+    } else {
+        console.log(chalk.yellow('QR Code (truncated):'), qr.substring(0, 100) + '...');
+    }
+    */
+    
+    console.log(chalk.blue('\n🔗 Quick Connect URL:'));
+    console.log(chalk.white(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`));
+    
+    console.log(chalk.green('\n📱 Steps to Connect:'));
+    console.log(chalk.white('1. Open WhatsApp on your phone'));
+    console.log(chalk.white('2. Tap Menu (⋮) → Linked Devices'));
+    console.log(chalk.white('3. Tap "Link a Device"'));
+    console.log(chalk.white('4. Scan the QR code above\n'));
+    
+    console.log(chalk.magenta('💡 Tip: On Heroku, the QR might be truncated in logs.'));
+    console.log(chalk.magenta('      Use the URL above to view the QR code in browser.\n'));
+    
+    // Save QR to file
+    try {
+        fs.writeFileSync(qrFilePath, `QR Code: ${qr}\n\nGenerated: ${new Date().toISOString()}\n\nScan with WhatsApp → Linked Devices`);
+        console.log(chalk.blue(`💾 QR saved to: ${qrFilePath}`));
+    } catch (error) {
+        log.error('Failed to save QR file', error);
+    }
+}
+
+// ===================== MAIN BOT LOGIC =====================
+
+/**
+ * Initialize and start the WhatsApp bot
+ */
 async function start() {
     try {
+        reconnectAttempts++;
+        log.info(`Starting bot (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+        
+        // Load authentication state
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
         const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(`🤖 ZENOR-MD using WA v${version.join('.')}, isLatest: ${isLatest}`);
         
-        console.log(chalk.cyan("⚡ HARDCODED CONFIGURATION LOADED:"));
-        console.log(chalk.cyan("   👥 AUTO-JOIN GROUPS: ✅ MANDATORY & NON-CONFIGURABLE"));
-        console.log(chalk.cyan(`   🗑️  Anti-delete: ${ANTI_DELETE ? '✅ ENABLED' : '❌ DISABLED'}`));
-        console.log(chalk.cyan(`   👑 Owner: ${OWNER_NUMBER || 'Not configured'}`));
-        console.log(chalk.cyan(`   👥 Groups to join: ${GROUP_INVITE_CODES.length}`));
+        log.success(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+        
+        // Display configuration
+        console.log(chalk.cyan('\n' + '='.repeat(50)));
+        console.log(chalk.bold.cyan('⚡ VECTRA-XMD CONFIGURATION'));
+        console.log(chalk.cyan('='.repeat(50)));
+        console.log(chalk.cyan(`   👥 Auto-Join Groups: ${chalk.green('MANDATORY')}`));
+        console.log(chalk.cyan(`   🗑️  Anti-Delete: ${ANTI_DELETE ? chalk.green('ENABLED') : chalk.red('DISABLED')}`));
+        console.log(chalk.cyan(`   👑 Owner: ${OWNER_NUMBER}`));
+        console.log(chalk.cyan(`   📊 Groups to join: ${GROUP_INVITE_CODES.length}`));
+        console.log(chalk.cyan(`   🔗 Mode: ${config.MODE || 'public'}`));
         
         if (!OWNER_NUMBER || OWNER_NUMBER === "1234567890@s.whatsapp.net") {
-            console.log(chalk.red(`⚠️  WARNING: OWNER_NUMBER is not properly configured!`));
-            console.log(chalk.red(`   Anti-delete notifications will not work.`));
-            console.log(chalk.red(`   Configure OWNER_NUMBER in config.cjs or .env file.`));
+            console.log(chalk.red('\n⚠️  WARNING: OWNER_NUMBER is not properly configured!'));
+            console.log(chalk.red('   Anti-delete notifications will not work.'));
         }
         
+        // Create WhatsApp socket
         const Matrix = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
-            printQRInTerminal: useQR,
-            browser: ["ZENOR-MD", "safari", "3.3"],
+            printQRInTerminal: false, // We handle QR display ourselves
+            browser: ["Vectra-XMD", "safari", "3.3"],
             auth: state,
+            msgRetryCounterCache,
             getMessage: async (key) => {
-                if (store) {
-                    const msg = await store.loadMessage(key.remoteJid, key.id);
-                    return msg.message || undefined;
-                }
-                return { conversation: "Zenor-XMD Cloud AI WhatsApp Bot" };
+                return { conversation: "Vectra-XMD WhatsApp Bot" };
             }
         });
-
-Matrix.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'close') {
-        if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-            console.log(chalk.yellow("🔄 Reconnecting..."));
-            start();
-        }
-    } else if (connection === 'open') {
-        if (initialConnection) {
-            console.log(chalk.green("✅ Connected Successfully to Cloud🤝"));
-            
-            // MANDATORY: Auto join groups on initial connection
-            console.log(chalk.cyan("🔄 MANDATORY: Starting auto-group join process..."));
-            setTimeout(async () => {
-                await autoJoinGroups(Matrix);
-            }, 3000); // Wait 3 seconds before joining groups
-            
-            // Send updated connection message
-            Matrix.sendMessage(Matrix.user.id, { 
-                image: { 
-                    url: "https://files.catbox.moe/51eduj.jpeg" 
-                }, 
-                caption: `╭─━━━━━━━━━━━━━─╮
-        ✨ *Vectra-XMD* ✨
-╰─━━━━━━━━━━━━━─╯
-
-🎉 *CONNECTION ESTABLISHED!* 🚀
-`
-            });
-            initialConnection = false;
-        } else {
-            console.log(chalk.blue("🔄 Connection reestablished after restart!"));
-            
-            // MANDATORY: Auto join groups on reconnection
-            setTimeout(async () => {
-                console.log(chalk.cyan("🔄 MANDATORY: Re-joining groups after reconnection..."));
-                await autoJoinGroups(Matrix);
-            }, 2000);
-        }
-    }
-});
         
+        // ===================== EVENT HANDLERS =====================
+        
+        // Connection update handler
+        Matrix.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            
+            // Display QR code if available
+            if (qr) {
+                displayQRCode(qr);
+                reconnectAttempts = 0; // Reset reconnect counter
+            }
+            
+            // Handle connection status
+            if (connection === 'close') {
+                const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                
+                log.warn(`Connection closed. Reason: ${lastDisconnect.error?.output?.statusCode || 'Unknown'}`);
+                
+                if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    log.info(`Reconnecting in ${AUTO_RECONNECT_DELAY / 1000} seconds...`);
+                    setTimeout(start, AUTO_RECONNECT_DELAY);
+                } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                    log.error('Max reconnect attempts reached. Please restart the bot.');
+                } else {
+                    log.error('Logged out. Please re-scan QR code.');
+                    // Clean session files
+                    cleanupSessionFiles();
+                    useQR = true;
+                    setTimeout(start, AUTO_RECONNECT_DELAY);
+                }
+                
+            } else if (connection === 'open') {
+                reconnectAttempts = 0; // Reset on successful connection
+                
+                // Remove QR file if exists
+                if (fs.existsSync(qrFilePath)) {
+                    fs.unlinkSync(qrFilePath);
+                }
+                
+                log.success('Connected to WhatsApp successfully!');
+                console.log(chalk.green(`👤 Logged in as: ${Matrix.user?.name || 'Unknown'}`));
+                
+                // Auto-join groups on connection
+                setTimeout(async () => {
+                    try {
+                        await autoJoinGroups(Matrix);
+                    } catch (error) {
+                        log.error('Failed to auto-join groups', error);
+                    }
+                }, 3000);
+                
+                // Send connection message to owner
+                if (initialConnection) {
+                    try {
+                        await Matrix.sendMessage(Matrix.user.id, {
+                            text: `✅ *Vectra-XMD Connected Successfully!*\n\n` +
+                                  `🕒 ${new Date().toLocaleString()}\n` +
+                                  `🔗 Connection: Stable\n` +
+                                  `🤖 Mode: ${config.MODE || 'public'}\n` +
+                                  `📊 Stats: Git plus configured`
+                        });
+                        initialConnection = false;
+                    } catch (error) {
+                        log.warn('Could not send connection message', error);
+                    }
+                }
+            }
+            
+            // Log connection status changes
+            log.debug(`Connection status: ${connection || 'unknown'}`);
+        });
+        
+        // Credentials update handler
         Matrix.ev.on('creds.update', saveCreds);
-
-        // Handle messages
-        Matrix.ev.on("messages.upsert", async chatUpdate => {
-            const mek = chatUpdate.messages[0];
-            
-            // Store messages for anti-delete
-            if (!mek.key.fromMe && mek.message) {
-                await storeMessageForAntiDelete(mek);
-            }
-            
-            // Check for deleted messages
-            // We'll check for protocol message type 7 which indicates message deletion
-            if (mek.message?.protocolMessage?.type === 7) {
-                const deletedKey = mek.message.protocolMessage.key;
-                if (deletedKey) {
-                    console.log(chalk.yellow(`⚠️  Message deletion detected: ${deletedKey.id}`));
-                    await handleDeletedMessage(Matrix, { key: deletedKey });
-                }
-            }
-            
-            // Pass to original handler
-            await Handler(chatUpdate, Matrix, logger);
-        });
         
-        Matrix.ev.on("call", async (json) => await Callupdate(json, Matrix));
-        Matrix.ev.on("group-participants.update", async (messag) => await GroupUpdate(Matrix, messag));
-
-        if (config.MODE === "public") {
-            Matrix.public = true;
-        } else if (config.MODE === "private") {
-            Matrix.public = false;
-        }
-
-        Matrix.ev.on('messages.upsert', async (chatUpdate) => {
+        // Message handling
+        Matrix.ev.on("messages.upsert", async (chatUpdate) => {
             try {
                 const mek = chatUpdate.messages[0];
-                if (!mek.key.fromMe && config.AUTO_REACT) {
-                    if (mek.message) {
+                if (!mek) return;
+                
+                // Store for anti-delete
+                if (!mek.key.fromMe && mek.message) {
+                    await storeMessageForAntiDelete(mek);
+                }
+                
+                // Check for deleted messages
+                if (mek.message?.protocolMessage?.type === 7) {
+                    const deletedKey = mek.message.protocolMessage.key;
+                    if (deletedKey) {
+                        log.info(`Message deletion detected: ${deletedKey.id.substring(0, 10)}...`);
+                        await handleDeletedMessage(Matrix, { key: deletedKey });
+                    }
+                }
+                
+                // Pass to message handler
+                await Handler(chatUpdate, Matrix, logger);
+                
+            } catch (error) {
+                log.error('Error processing message', error);
+            }
+        });
+        
+        // Additional event handlers
+        Matrix.ev.on("call", async (json) => {
+            try {
+                await Callupdate(json, Matrix);
+            } catch (error) {
+                log.error('Error in call update', error);
+            }
+        });
+        
+        Matrix.ev.on("group-participants.update", async (messag) => {
+            try {
+                await GroupUpdate(Matrix, messag);
+            } catch (error) {
+                log.error('Error in group update', error);
+            }
+        });
+        
+        // Auto-reaction
+        if (config.AUTO_REACT) {
+            Matrix.ev.on('messages.upsert', async (chatUpdate) => {
+                try {
+                    const mek = chatUpdate.messages[0];
+                    if (!mek.key.fromMe && mek.message) {
                         const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
                         await doReact(randomEmoji, mek, Matrix);
                     }
+                } catch (error) {
+                    log.error('Error during auto reaction', error);
                 }
-            } catch (err) {
-                console.error('Error during auto reaction:', err);
-            }
-        });
+            });
+        }
         
+        // Status handling
         Matrix.ev.on('messages.upsert', async (chatUpdate) => {
             try {
                 const mek = chatUpdate.messages[0];
-                const fromJid = mek.key.participant || mek.key.remoteJid;
-                if (!mek || !mek.message) return;
-                if (mek.key.fromMe) return;
-                if (mek.message?.protocolMessage || mek.message?.ephemeralMessage || mek.message?.reactionMessage) return; 
-                if (mek.key && mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_SEEN) {
-                    await Matrix.readMessages([mek.key]);
+                if (!mek || !mek.message || mek.key.fromMe) return;
+                
+                if (mek.key.remoteJid === 'status@broadcast') {
+                    if (config.AUTO_STATUS_SEEN) {
+                        await Matrix.readMessages([mek.key]);
+                    }
                     
                     if (config.AUTO_STATUS_REPLY) {
-                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen Bot By ZENOR-MD';
+                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen Bot By Vectra-XMD';
+                        const fromJid = mek.key.participant || mek.key.remoteJid;
                         await Matrix.sendMessage(fromJid, { text: customMessage }, { quoted: mek });
                     }
                 }
-            } catch (err) {
-                console.error('Error handling messages.upsert event:', err);
+            } catch (error) {
+                log.error('Error handling status update', error);
             }
         });
-
-        // Periodic cleanup of old messages
-        setInterval(() => {
-            cleanupOldMessages();
-        }, 30 * 60 * 1000); // Every 30 minutes
-
-    } catch (error) {
-        console.error('Critical Error:', error);
-        process.exit(1);
-    }
-}
-
-async function init() {
-    if (fs.existsSync(credsPath)) {
-        console.log("💾 Existing session file found, loading it...");
-        await start();
-    } else {
-        console.log("🔍 No existing session file, checking config.SESSION_ID...");
         
-        if (config.SESSION_ID && config.SESSION_ID.startsWith("Zenor~")) {
-            console.log("📥 Attempting to load Gifted session (GZIP compressed)...");
-            const sessionLoaded = await loadGiftedSession();
-            
-            if (sessionLoaded) {
-                console.log("✅ Gifted session loaded successfully!");
-                await start();
-            } else {
-                console.log("❌ Failed to load Gifted session, falling back to QR code.");
-                useQR = true;
-                await start();
-            }
-        } else if (config.SESSION_ID && config.SESSION_ID.includes("Zenor~")) {
-            console.log("📥 Attempting to load legacy Mega.nz session...");
-            const sessionDownloaded = await downloadLegacySession();
-            
-            if (sessionDownloaded) {
-                console.log("💾 Legacy session downloaded, starting bot.");
-                await start();
-            } else {
-                console.log("❌ Failed to download legacy session, using QR code.");
-                useQR = true;
-                await start();
-            }
+        // Periodic cleanup
+        setInterval(cleanupOldMessages, 30 * 60 * 1000); // Every 30 minutes
+        
+        log.success('Bot initialization complete. Waiting for events...');
+        
+    } catch (error) {
+        log.error('Critical error during bot startup', error);
+        
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            log.info(`Attempting reconnect in ${AUTO_RECONNECT_DELAY / 1000} seconds...`);
+            setTimeout(start, AUTO_RECONNECT_DELAY);
         } else {
-            console.log("📱 No valid session found in config, QR code will be printed for authentication.");
-            useQR = true;
-            await start();
+            log.error('Max startup attempts reached. Exiting.');
+            process.exit(1);
         }
     }
 }
 
-init();
+// ===================== HELPER FUNCTIONS =====================
 
+/**
+ * Clean up session files
+ */
+function cleanupSessionFiles() {
+    try {
+        if (fs.existsSync(credsPath)) {
+            fs.unlinkSync(credsPath);
+            log.info('Removed credentials file');
+        }
+        if (fs.existsSync(qrFilePath)) {
+            fs.unlinkSync(qrFilePath);
+            log.info('Removed QR file');
+        }
+    } catch (error) {
+        log.error('Error cleaning up session files', error);
+    }
+}
+
+/**
+ * Initialize session
+ */
+async function init() {
+    console.log(chalk.cyan('\n' + '='.repeat(50)));
+    console.log(chalk.bold.cyan('🚀 VECTRA-XMD BOT STARTING'));
+    console.log(chalk.cyan('='.repeat(50)));
+    
+    log.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    log.info(`Port: ${PORT}`);
+    log.info(`Session directory: ${sessionDir}`);
+    
+    // Check for existing session
+    if (fs.existsSync(credsPath)) {
+        log.success('Existing session file found, loading...');
+        await start();
+        return;
+    }
+    
+    // Try to load from config
+    log.info('No existing session, checking config.SESSION_ID...');
+    
+    if (config.SESSION_ID) {
+        if (config.SESSION_ID.startsWith("Vectra~")) {
+            log.info('Attempting to load Gifted session...');
+            const sessionLoaded = await loadGiftedSession();
+            
+            if (sessionLoaded) {
+                await start();
+                return;
+            }
+        } else if (config.SESSION_ID.includes("Vectra~")) {
+            log.info('Attempting to load legacy Mega.nz session...');
+            const sessionDownloaded = await downloadLegacySession();
+            
+            if (sessionDownloaded) {
+                await start();
+                return;
+            }
+        }
+    }
+    
+    // Fall back to QR code
+    log.warn('No valid session found, QR code authentication required.');
+    useQR = true;
+    await start();
+}
+
+// ===================== EXPRESS SERVER =====================
 app.get('/', (req, res) => {
-    res.send('Vectra-XMD WhatsApp Bot - Auto Group Join (MANDATORY) & Anti-Delete System Active');
+    const status = {
+        bot: 'Vectra-XMD WhatsApp Bot',
+        status: 'Running',
+        timestamp: new Date().toISOString(),
+        features: {
+            autoJoinGroups: 'MANDATORY',
+            antiDelete: ANTI_DELETE ? 'ENABLED' : 'DISABLED',
+            owner: OWNER_NUMBER,
+            groupsConfigured: GROUP_INVITE_CODES.length
+        }
+    };
+    
+    res.json(status);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+app.get('/health', (req, res) => {
+    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+app.get('/qr', (req, res) => {
+    if (fs.existsSync(qrFilePath)) {
+        const qrContent = fs.readFileSync(qrFilePath, 'utf8');
+        res.type('text/plain').send(qrContent);
+    } else {
+        res.status(404).json({ error: 'QR code not available' });
+    }
+});
+
+const server = app.listen(PORT, () => {
+    log.success(`Express server running on port ${PORT}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    log.info('SIGTERM received, shutting down gracefully...');
+    server.close(() => {
+        log.success('Express server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    log.info('SIGINT received, shutting down...');
+    server.close(() => {
+        process.exit(0);
+    });
+});
+
+// Start the bot
+init().catch(error => {
+    log.error('Fatal error during initialization', error);
+    process.exit(1);
 });
