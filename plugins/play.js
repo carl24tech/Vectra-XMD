@@ -1,55 +1,149 @@
+// app/plugins/play.js (ESM)
 import axios from "axios";
 import yts from "yt-search";
-import config from '../config.cjs';
+import config from "../config.cjs";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { spawn } from "child_process";
+
+async function getFfmpegBin() {
+  // Try ffmpeg-static first (best on Heroku)
+  try {
+    const mod = await import("ffmpeg-static");
+    const ffmpegPath = mod.default || mod;
+    if (ffmpegPath) return ffmpegPath;
+  } catch (_) {
+    // ignore
+  }
+  // Fallback to system ffmpeg if available (if you use buildpack)
+  return "ffmpeg";
+}
+
+async function downloadToFile(url, outPath) {
+  const res = await axios.get(url, {
+    responseType: "stream",
+    timeout: 60000,
+    maxRedirects: 5,
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+
+  await new Promise((resolve, reject) => {
+    const w = fs.createWriteStream(outPath);
+    res.data.pipe(w);
+    w.on("finish", resolve);
+    w.on("error", reject);
+  });
+}
+
+async function convertToOpus(inputPath, outputPath) {
+  const ffmpegBin = await getFfmpegBin();
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-y",
+      "-i", inputPath,
+      "-vn",
+      "-ac", "1",
+      "-ar", "48000",
+      "-b:a", "128k",
+      "-c:a", "libopus",
+      outputPath,
+    ];
+
+    const ff = spawn(ffmpegBin, args);
+    let err = "";
+
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("error", (e) => reject(e));
+    ff.on("close", (code) => {
+      if (code === 0) return resolve();
+      reject(new Error("ffmpeg failed: " + err.slice(-2000)));
+    });
+  });
+}
 
 const play = async (m, gss) => {
   const prefix = config.PREFIX;
-  const cmd = m.body.startsWith(prefix) ? m.body.slice(prefix.length).split(" ")[0].toLowerCase() : "";
-  const args = m.body.slice(prefix.length + cmd.length).trim().split(" ");
+  const body = m.body || "";
 
-  if (cmd === "play") {
-    if (args.length === 0 || !args.join(" ")) {
-      return m.reply("*Please provide a song name or keywords to search for.*");
+  const cmd = body.startsWith(prefix)
+    ? body.slice(prefix.length).trim().split(/\s+/)[0]?.toLowerCase()
+    : "";
+
+  const args = body.startsWith(prefix)
+    ? body.slice(prefix.length).trim().split(/\s+/).slice(1)
+    : [];
+
+  if (cmd !== "play") return;
+
+  let inputFile, outputFile;
+
+  try {
+    if (!args.length) return m.reply("*Example:* .play shape of you");
+
+    const query = args.join(" ");
+    await m.reply(`🔍 *Searching:* ${query}`);
+
+    const search = await yts(query);
+    const video = search?.videos?.[0];
+    if (!video) return m.reply("❌ *No song found*");
+
+    const youtubeUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
+    await m.reply(`🎧 *Processing:* ${video.title}`);
+
+    const apiUrl = `https://apiskeith.vercel.app/download/audio?url=${encodeURIComponent(youtubeUrl)}`;
+    const apiRes = await axios.get(apiUrl, { timeout: 30000 });
+
+    if (!apiRes.data?.status || !apiRes.data?.result) {
+      return m.reply("❌ *Audio API failed*");
     }
 
-    const searchQuery = args.join(" ");
-    m.reply("*🎧 Searching for the song...*");
+    const audioUrl = apiRes.data.result;
+    if (typeof audioUrl !== "string" || !audioUrl.startsWith("http")) {
+      return m.reply("❌ *Invalid audio URL*");
+    }
 
-    try {
-      const searchResults = await yts(searchQuery);
-      if (!searchResults.videos || searchResults.videos.length === 0) {
-        return m.reply(`❌ No results found for "${searchQuery}".`);
-      }
+    const tmp = os.tmpdir();
+    const id = Date.now();
+    inputFile = path.join(tmp, `play_${id}.input`);
+    outputFile = path.join(tmp, `play_${id}.ogg`);
 
-      const firstResult = searchResults.videos[0];
-      const videoUrl = firstResult.url;
+    await downloadToFile(audioUrl, inputFile);
+    await convertToOpus(inputFile, outputFile);
 
-      // First API endpoint
-      const apiUrl = `https://api.davidcyriltech.my.id/download/ytmp3?url=${videoUrl}`;
-      const response = await axios.get(apiUrl);
+    const size = fs.statSync(outputFile).size;
+    if (size > 18 * 1024 * 1024) {
+      return m.reply("❌ *Audio too large. Try a shorter song*");
+    }
 
-      if (!response.data.success) {
-        return m.reply(`❌ Failed to fetch audio for "${searchQuery}".`);
-      }
+    // 🎙️ send as voice note
+    await gss.sendMessage(
+      m.from,
+      {
+        audio: fs.readFileSync(outputFile),
+        mimetype: "audio/ogg; codecs=opus",
+        ptt: true,
+      },
+      { quoted: m }
+    );
 
-      const { title, download_url } = response.data.result;
+    await m.reply(`🎙️ *Voice note sent:* ${video.title}`);
+  } catch (err) {
+    console.error("PLAY ERROR:", err?.response?.data || err);
 
-      // Send the audio file
-      await gss.sendMessage(
-        m.from,
-        {
-          audio: { url: download_url },
-          mimetype: "audio/mp4",
-          ptt: false,
-        },
-        { quoted: m }
+    // Give a helpful message when ffmpeg is missing
+    const msg = String(err?.message || "");
+    if (msg.includes("spawn ffmpeg") || msg.includes("ENOENT")) {
+      return m.reply(
+        "❌ *ffmpeg not found.* Install `ffmpeg-static` in dependencies OR add an ffmpeg buildpack."
       );
-
-      m.reply(`✅ *${title}* has been downloaded successfully!`);
-    } catch (error) {
-      console.error(error);
-      m.reply("❌ An error occurred while processing your request.");
     }
+
+    return m.reply("❌ *Failed to send audio*");
+  } finally {
+    try { if (inputFile && fs.existsSync(inputFile)) fs.unlinkSync(inputFile); } catch {}
+    try { if (outputFile && fs.existsSync(outputFile)) fs.unlinkSync(outputFile); } catch {}
   }
 };
 
