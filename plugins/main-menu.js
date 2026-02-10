@@ -68,7 +68,7 @@ const menu = async (m, Matrix) => {
 
   if (validCommands.includes(cmd)) {
     const str = `
-╭━━━〔 *${config.BOT_NAME}* 〕━━━┈⊷
+╭━━━〔 *Vectra-XMD* 〕━━━┈⊷
 ┃★╭──────────────
 ┃★│ Owner : *${config.OWNER_NAME}*
 ┃★│ User : *${m.pushName}*
@@ -81,7 +81,7 @@ const menu = async (m, Matrix) => {
 ┃★╰──────────────
 ╰━━━━━━━━━━━━━━━┈⊷
 
-> ${pushwish} *${m.pushName}*!
+> hello! *${m.pushName}*!
 
 ╭━━〔 *Download Menu* 〕━━┈⊷
 ┃◈╭─────────────·๏
@@ -208,7 +208,7 @@ const menu = async (m, Matrix) => {
 ┃◈┃• githubstalk
 ┃◈└───────────┈⊷
 ╰──────────────┈⊷
-> *${config.DESCRIPTION}*`;
+> Vectra-XMD`;
 
     // Check if MENU_IMAGE exists in config and is not empty
     let menuImage;
@@ -235,7 +235,7 @@ const menu = async (m, Matrix) => {
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
           newsletterJid: '120363398040175935@newsletter',
-          newsletterName: "JawadTechX",
+          newsletterName: "Vectra-XMD",
           serverMessageId: 143
         }
       }
