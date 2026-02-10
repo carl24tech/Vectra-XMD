@@ -1,4 +1,4 @@
-// index.js - Vectra-XMD WhatsApp Bot (Fixed command processing)
+
 import dotenv from 'dotenv';
 dotenv.config();
 
