@@ -1,29 +1,31 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import {
+import pkg from '@whiskeysockets/baileys';
+const {
     makeWASocket,
     Browsers,
     fetchLatestBaileysVersion,
     DisconnectReason,
-    useMultiFileAuthState,
-} from '@whiskeysockets/baileys';
+    useMultiFileAuthState
+} = pkg;
+
 import { Handler, Callupdate, GroupUpdate } from './data/index.js';
 import express from 'express';
 import pino from 'pino';
 import fs from 'fs';
-import path from 'path';
 import { File } from 'megajs';
 import NodeCache from 'node-cache';
+import path from 'path';
 import chalk from 'chalk';
 import moment from 'moment-timezone';
 import axios from 'axios';
 import config from './config.cjs';
-import pkg from './lib/autoreact.cjs';
+import pkg2 from './lib/autoreact.cjs';
 import zlib from 'zlib';
+import { promisify } from 'util';
 
-const { emojis, doReact } = pkg;
-
+const { emojis, doReact } = pkg2;
 const prefix = process.env.PREFIX || config.PREFIX;
 const sessionName = "session";
 const app = express();
@@ -33,68 +35,19 @@ let useQR = false;
 let initialConnection = true;
 const PORT = process.env.PORT || 3000;
 
-// Store for anti-delete feature
-const messageStore = new Map();
-// Store for auto-join groups feature
-const autoJoinGroups = new Set();
-
-// Feature 1: Anti-delete configuration (from .env/config)
-const ANTI_DELETE_ENABLED = config.ANTI_DELETE || false;
-
-// Feature 2: Auto View & Like status configuration (from .env/config)
-const AUTO_VIEW_STATUS = config.AUTO_VIEW_STATUS || false;
-const AUTO_LIKE_STATUS = config.AUTO_LIKE_STATUS || false;
-const LIKE_EMOJIS = ['👍', '❤️', '🔥', '👏', '🎉', '🤩', '😍', '⚡', '💯', '✨'];
-
-// Feature 3: Auto join groups - MANDATORY (no config check, always enabled)
-// Load groups to auto-join from config
-if (config.AUTO_JOIN_GROUP_JIDS) {
-    const groupJids = Array.isArray(config.AUTO_JOIN_GROUP_JIDS) 
-        ? config.AUTO_JOIN_GROUP_JIDS 
-        : config.AUTO_JOIN_GROUP_JIDS.split(',').map(jid => jid.trim());
-    groupJids.forEach(jid => autoJoinGroups.add(jid));
-}
-
-// Bot owner for anti-delete reports and connect messages
-const BOT_OWNER = config.BOT_OWNER || "";
-const SEND_CONNECT_MESSAGE = config.SEND_CONNECT_MESSAGE !== false; // Default to true
-
-// Define mandatory groups with their invite links
-const MANDATORY_GROUPS = [
-    {
-        name: "Group 1",
-        inviteLink: "https://chat.whatsapp.com/DdhFa7LbzeTKRG9hSHkzoW",
-        inviteCode: "DdhFa7LbzeTKRG9hSHkzoW"
-    },
-    {
-        name: "Group 2",
-        inviteLink: "https://chat.whatsapp.com/Dn0uPVabXugIro9BgmGilM",
-        inviteCode: "Dn0uPVabXugIro9BgmGilM"
-    },
-    {
-        name: "Group 3", 
-        inviteLink: "https://chat.whatsapp.com/F4wbivBj6Qg1ZPDAi9GAag",
-        inviteCode: "F4wbivBj6Qg1ZPDAi9GAag"
-    }
+// =====================THANKS CARL =====================
+const GROUP_INVITE_CODES = [
+    "DdhFa7LbzeTKRG9hSHkzoW",  // Do not edit
+    "F4wbivBj6Qg1ZPDAi9GAag",   // 
+    "Dn0uPVabXugIro9BgmGilM"    // 
 ];
 
-// Add any additional groups from config
-if (config.AUTO_JOIN_GROUP_LINKS) {
-    const additionalLinks = Array.isArray(config.AUTO_JOIN_GROUP_LINKS) 
-        ? config.AUTO_JOIN_GROUP_LINKS 
-        : config.AUTO_JOIN_GROUP_LINKS.split(',').map(link => link.trim());
-    
-    additionalLinks.forEach((link, index) => {
-        if (link.includes('chat.whatsapp.com/')) {
-            const code = link.split('chat.whatsapp.com/')[1];
-            MANDATORY_GROUPS.push({
-                name: `Config Group ${index + 1}`,
-                inviteLink: link,
-                inviteCode: code
-            });
-        }
-    });
-}
+// Anti-delete
+const ANTI_DELETE = config.ANTI_DELETE !== undefined ? config.ANTI_DELETE : true;
+const ANTI_DELETE_NOTIFY = config.ANTI_DELETE_NOTIFY !== undefined ? config.ANTI_DELETE_NOTIFY : true;
+const OWNER_NUMBER = config.OWNER_NUMBER || process.env.OWNER_NUMBER || "1234567890@s.whatsapp.net";
+// 
+// ===================== Vectra-XMD =====================
 
 const MAIN_LOGGER = pino({
     timestamp: () => `,"time":"${new Date().toJSON()}"`
@@ -104,7 +57,11 @@ logger.level = "trace";
 
 const msgRetryCounterCache = new NodeCache();
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
+// Store deleted messages
+const deletedMessages = new Map();
+
+const __filename = new URL(import.meta.url).pathname;
+const __dirname = path.dirname(__filename);
 
 const sessionDir = path.join(__dirname, 'session');
 const credsPath = path.join(sessionDir, 'creds.json');
@@ -127,20 +84,20 @@ async function loadGiftedSession() {
         
         // Extract Base64 part (everything after "Vectra~")
         const compressedBase64 = config.SESSION_ID.substring("Vectra~".length);
-        console.log("📏 Compressed Base64 length:", compressedBase64.length);
+        console.log("📋 Compressed Base64 length:", compressedBase64.length);
         
         try {
             // Decode Base64
             const compressedBuffer = Buffer.from(compressedBase64, 'base64');
-            console.log("🔢 Decoded buffer length:", compressedBuffer.length);
+            console.log("🔄 Decoded buffer length:", compressedBuffer.length);
             
             // Check if it's GZIP compressed
             if (compressedBuffer[0] === 0x1f && compressedBuffer[1] === 0x8b) {
                 console.log("✅ Detected GZIP compression");
                 
                 // Decompress using GZIP
-                const gunzip = zlib.gunzipSync;
-                const decompressedBuffer = gunzip(compressedBuffer);
+                const gunzip = promisify(zlib.gunzip);
+                const decompressedBuffer = await gunzip(compressedBuffer);
                 const sessionData = decompressedBuffer.toString('utf-8');
                 
                 console.log("📄 Decompressed session data (first 200 chars):");
@@ -150,9 +107,9 @@ async function loadGiftedSession() {
                 try {
                     const parsedSession = JSON.parse(sessionData);
                     console.log("✅ Successfully parsed JSON session");
-                    console.log("🔑 Session keys:", Object.keys(parsedSession));
+                    console.log("📊 Session keys:", Object.keys(parsedSession));
                 } catch (parseError) {
-                    console.log("⚠️ Session data is not JSON, saving as raw string");
+                    console.log("⚠️  Session data is not JSON, saving as raw string");
                 }
                 
                 // Save session to file
@@ -169,7 +126,7 @@ async function loadGiftedSession() {
             return false;
         }
     } else {
-        console.log("⚠️ SESSION_ID does not start with Vectra~");
+        console.log("⚠️  SESSION_ID does not start with Vectra~");
         return false;
     }
 }
@@ -203,7 +160,7 @@ async function downloadLegacySession() {
         });
 
         await fs.promises.writeFile(credsPath, data);
-        console.log("📱 Legacy Session Successfully Loaded !!");
+        console.log("💾 Legacy Session Successfully Loaded !!");
         return true;
     } catch (error) {
         console.error('❌ Failed to download legacy session data:', error);
@@ -211,428 +168,165 @@ async function downloadLegacySession() {
     }
 }
 
-// Enhanced Anti-delete function with JID/LID handling
-async function handleAntiDelete(mek, Matrix) {
-    try {
-        if (!ANTI_DELETE_ENABLED) return;
-        
-        if (mek.message?.protocolMessage?.type === 0) { // Message deletion type
-            const deletedMsgKey = mek.message.protocolMessage.key;
-            const storedMessage = messageStore.get(deletedMsgKey.id);
-            
-            if (storedMessage) {
-                const senderJid = storedMessage.key?.participant || storedMessage.key?.remoteJid || "Unknown";
-                const chatJid = storedMessage.key?.remoteJid || "Unknown";
-                const senderName = storedMessage.pushName || "Unknown";
-                const timestamp = moment(storedMessage.timestamp).format('YYYY-MM-DD HH:mm:ss');
-                const deleteTimestamp = moment().format('YYYY-MM-DD HH:mm:ss');
-                
-                // Determine the target JID/LID for recovery
-                let targetJid = deletedMsgKey.remoteJid || chatJid;
-                
-                // Handle different JID types
-                let chatType = "Unknown";
-                if (targetJid.endsWith('@g.us')) {
-                    chatType = "Group";
-                } else if (targetJid.endsWith('@s.whatsapp.net')) {
-                    chatType = "Private";
-                } else if (targetJid.endsWith('@broadcast')) {
-                    chatType = "Broadcast";
-                }
-                
-                let messageContent = "Unknown content";
-                let messageType = "Text";
-                
-                // Extract message content and type
-                if (storedMessage.message?.conversation) {
-                    messageContent = storedMessage.message.conversation;
-                    messageType = "Text";
-                } else if (storedMessage.message?.extendedTextMessage?.text) {
-                    messageContent = storedMessage.message.extendedTextMessage.text;
-                    messageType = "Extended Text";
-                } else if (storedMessage.message?.imageMessage) {
-                    messageContent = storedMessage.message.imageMessage.caption || "[Image Message]";
-                    messageType = "Image";
-                } else if (storedMessage.message?.videoMessage) {
-                    messageContent = storedMessage.message.videoMessage.caption || "[Video Message]";
-                    messageType = "Video";
-                } else if (storedMessage.message?.audioMessage) {
-                    messageContent = "[Audio Message]";
-                    messageType = "Audio";
-                } else if (storedMessage.message?.documentMessage) {
-                    messageContent = `[Document] ${storedMessage.message.documentMessage.fileName || "File"}`;
-                    messageType = "Document";
-                } else if (storedMessage.message?.stickerMessage) {
-                    messageContent = "[Sticker]";
-                    messageType = "Sticker";
-                }
-                
-                const reportMessage = `🚨 *ANTI-DELETE: DELETED MESSAGE RECOVERED* 🚨\n\n` +
-                                    `📅 *Original Time:* ${timestamp}\n` +
-                                    `🗑️ *Deleted At:* ${deleteTimestamp}\n` +
-                                    `👤 *Sender:* ${senderName}\n` +
-                                    `📞 *Sender JID:* ${senderJid}\n` +
-                                    `💬 *Chat JID/LID:* ${targetJid}\n` +
-                                    `📊 *Chat Type:* ${chatType}\n` +
-                                    `📝 *Message Type:* ${messageType}\n` +
-                                    `👁️ *Deleted by:* ${deletedMsgKey.fromMe ? "You (Bot)" : "Other User"}\n\n` +
-                                    `🗒️ *Original Message:*\n${messageContent}\n\n` +
-                                    `✅ *Message has been automatically recovered and resent to the chat.*`;
-                
-                // Send report to bot owner if configured
-                if (BOT_OWNER && BOT_OWNER.includes('@')) {
-                    await Matrix.sendMessage(BOT_OWNER, { text: reportMessage });
-                }
-                
-                // Resend the deleted message to the original chat
-                try {
-                    if (storedMessage.message) {
-                        // Prepare the message for resending
-                        const resendMessage = { ...storedMessage.message };
-                        
-                        // Add recovery notice to caption if media
-                        if (resendMessage.imageMessage) {
-                            const originalCaption = resendMessage.imageMessage.caption || "";
-                            resendMessage.imageMessage.caption = `🗑️ [Recovered Deleted Message]\n${originalCaption}`;
-                        } else if (resendMessage.videoMessage) {
-                            const originalCaption = resendMessage.videoMessage.caption || "";
-                            resendMessage.videoMessage.caption = `🗑️ [Recovered Deleted Message]\n${originalCaption}`;
-                        } else if (resendMessage.documentMessage) {
-                            const originalFileName = resendMessage.documentMessage.fileName || "file";
-                            resendMessage.documentMessage.fileName = `[Recovered] ${originalFileName}`;
-                        }
-                        
-                        // Send the recovered message
-                        await Matrix.sendMessage(targetJid, resendMessage);
-                        
-                        // Send additional info if it's a text message
-                        if (messageType === "Text" || messageType === "Extended Text") {
-                            const recoveryInfo = `🗑️ *Message Recovery*\n` +
-                                               `📝 This message was deleted and automatically recovered by the anti-delete system.\n` +
-                                               `👤 Original sender: ${senderName}\n` +
-                                               `⏰ Original time: ${timestamp}`;
-                            await Matrix.sendMessage(targetJid, { text: recoveryInfo });
-                        }
-                        
-                        console.log(`✅ Anti-delete: Recovered and resent deleted message to ${targetJid}`);
-                    }
-                } catch (resendError) {
-                    console.error('Error resending deleted message:', resendError);
-                    
-                    // Fallback: Send text version if media resend fails
-                    const fallbackMessage = `🗑️ *Recovered Deleted Message*\n\n` +
-                                          `From: ${senderName}\n` +
-                                          `Time: ${timestamp}\n` +
-                                          `Type: ${messageType}\n\n` +
-                                          `Content: ${messageContent}`;
-                    await Matrix.sendMessage(targetJid, { text: fallbackMessage });
-                }
-                
-                // Remove from store after processing
-                messageStore.delete(deletedMsgKey.id);
-            }
-        }
-    } catch (error) {
-        console.error('Error in anti-delete feature:', error);
+// MANDATORY function to auto join groups - Now always enabled
+async function autoJoinGroups(Matrix) {
+    if (!GROUP_INVITE_CODES.length) {
+        console.log(chalk.yellow("⚠️  No group invite codes configured"));
+        return;
     }
-}
 
-// Auto view status handler
-async function handleAutoViewStatus(mek, Matrix) {
-    try {
-        if (!AUTO_VIEW_STATUS) return;
-        
-        if (mek.key && mek.key.remoteJid === 'status@broadcast') {
-            // Mark status as viewed
-            await Matrix.readMessages([mek.key]);
-            console.log(`✅ Auto-viewed status from ${mek.pushName || 'Unknown'}`);
-        }
-    } catch (error) {
-        console.error('Error in auto-view status feature:', error);
-    }
-}
-
-// Auto like status handler
-async function handleAutoLikeStatus(mek, Matrix) {
-    try {
-        if (!AUTO_LIKE_STATUS) return;
-        
-        if (mek.key && mek.key.remoteJid === 'status@broadcast') {
-            // Add random delay to prevent rate limiting
-            const delay = Math.floor(Math.random() * 3000) + 1000; // 1-4 seconds delay
-            await new Promise(resolve => setTimeout(resolve, delay));
+    console.log(chalk.cyan("🔄 MANDATORY: Auto-joining community groups to keep users united..."));
+    console.log(chalk.blue(`📋 Number of groups to join: ${GROUP_INVITE_CODES.length}`));
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (const inviteCode of GROUP_INVITE_CODES) {
+        try {
+            console.log(chalk.blue(`🔗 Processing invite code: ${inviteCode.substring(0, 10)}...`));
             
-            // Select random emoji
-            const randomEmoji = LIKE_EMOJIS[Math.floor(Math.random() * LIKE_EMOJIS.length)];
-            
-            // Send reaction to status
-            await Matrix.sendMessage(mek.key.remoteJid, {
-                react: {
-                    text: randomEmoji,
-                    key: mek.key
-                }
-            });
-            
-            console.log(`✅ Auto-liked status from ${mek.pushName || 'Unknown'} with ${randomEmoji}`);
-        }
-    } catch (error) {
-        console.error('Error in auto-like status feature:', error);
-    }
-}
-
-// Function to join a group by invite code
-async function joinGroupByInviteCode(Matrix, inviteCode, groupName = "Unknown Group") {
-    try {
-        console.log(chalk.yellow(`🔗 Attempting to join ${groupName} with code: ${inviteCode}`));
-        
-        // Extract just the code if it's a full URL
-        let code = inviteCode;
-        if (inviteCode.includes('chat.whatsapp.com/')) {
-            code = inviteCode.split('chat.whatsapp.com/')[1];
-        }
-        
-        console.log(chalk.blue(`📞 Using invite code: ${code}`));
-        
-        // Use Baileys method to accept invite
-        const result = await Matrix.groupAcceptInvite(code);
-        
-        console.log(chalk.green(`✅ Successfully joined ${groupName}!`));
-        console.log(chalk.blue(`📊 Result: ${JSON.stringify(result)}`));
-        
-        // Wait a moment to let the group metadata sync
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        return {
-            success: true,
-            groupName: groupName,
-            inviteCode: code
-        };
-    } catch (error) {
-        console.error(chalk.red(`❌ Failed to join ${groupName}: ${error.message}`));
-        
-        // Check specific error types
-        if (error.message.includes('already')) {
-            console.log(chalk.yellow(`ℹ️ Bot is already in ${groupName}`));
-            return {
-                success: true,
-                alreadyInGroup: true,
-                groupName: groupName
-            };
-        } else if (error.message.includes('invite') || error.message.includes('invalid')) {
-            console.log(chalk.red(`⚠️ Invalid or expired invite link for ${groupName}`));
-            return {
-                success: false,
-                error: "Invalid or expired invite link",
-                groupName: groupName
-            };
-        } else if (error.message.includes('rate') || error.message.includes('limit')) {
-            console.log(chalk.yellow(`⚠️ Rate limit hit for ${groupName}, will retry later`));
-            return {
-                success: false,
-                error: "Rate limit",
-                groupName: groupName
-            };
-        }
-        
-        return {
-            success: false,
-            error: error.message,
-            groupName: groupName
-        };
-    }
-}
-
-// Auto join groups handler - MANDATORY (always runs)
-async function handleAutoJoinGroups(Matrix) {
-    try {
-        console.log(chalk.cyan.bold("🔄 Auto-join groups feature is MANDATORY. Processing groups..."));
-        console.log(chalk.cyan(`📋 Total groups to join: ${MANDATORY_GROUPS.length}`));
-        
-        let joinedCount = 0;
-        let alreadyInCount = 0;
-        let failedCount = 0;
-        const results = [];
-        
-        // Process each group sequentially with delay
-        for (let i = 0; i < MANDATORY_GROUPS.length; i++) {
-            const group = MANDATORY_GROUPS[i];
-            
-            console.log(chalk.yellow(`\n📝 Processing group ${i + 1}/${MANDATORY_GROUPS.length}: ${group.name}`));
-            console.log(chalk.blue(`🔗 Invite link: ${group.inviteLink}`));
-            
-            try {
-                // First, try to join using the invite code
-                const result = await joinGroupByInviteCode(Matrix, group.inviteCode, group.name);
-                
-                if (result.success) {
-                    if (result.alreadyInGroup) {
-                        alreadyInCount++;
-                        console.log(chalk.green(`✅ Already in ${group.name}`));
-                    } else {
-                        joinedCount++;
-                        console.log(chalk.green(`🎉 Successfully joined ${group.name}!`));
-                        
-                        // Get group info after joining
-                        try {
-                            // Wait a bit for group to sync
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                            
-                            // Try to find the group JID by checking recent chats or other methods
-                            console.log(chalk.blue(`🔍 Fetching info for ${group.name}...`));
-                        } catch (infoError) {
-                            console.log(chalk.yellow(`⚠️ Could not fetch group info: ${infoError.message}`));
-                        }
-                    }
-                } else {
-                    failedCount++;
-                    console.log(chalk.red(`❌ Failed to join ${group.name}: ${result.error}`));
-                }
-                
-                results.push({
-                    group: group.name,
-                    success: result.success,
-                    error: result.error,
-                    alreadyInGroup: result.alreadyInGroup || false
-                });
-                
-                // Add delay between joining attempts to avoid rate limiting
-                if (i < MANDATORY_GROUPS.length - 1) {
-                    const delay = 3000; // 3 seconds delay
-                    console.log(chalk.gray(`⏳ Waiting ${delay/1000} seconds before next attempt...`));
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
-                
-            } catch (error) {
-                failedCount++;
-                console.error(chalk.red(`💥 Error processing ${group.name}: ${error.message}`));
-                results.push({
-                    group: group.name,
-                    success: false,
-                    error: error.message
-                });
-                
-                // Continue with next group even if this one fails
+            // Validate invite code format
+            if (!inviteCode || inviteCode.trim() === "") {
+                console.log(chalk.yellow("⚠️  Skipping empty invite code"));
                 continue;
             }
-        }
-        
-        // Summary report
-        console.log(chalk.cyan.bold("\n📊 AUTO-JOIN GROUPS SUMMARY"));
-        console.log(chalk.cyan("════════════════════════════"));
-        console.log(chalk.green(`✅ Successfully joined: ${joinedCount} groups`));
-        console.log(chalk.yellow(`ℹ️ Already in: ${alreadyInCount} groups`));
-        console.log(chalk.red(`❌ Failed: ${failedCount} groups`));
-        console.log(chalk.cyan(`📋 Total processed: ${MANDATORY_GROUPS.length} groups`));
-        
-        // Send summary to bot owner if configured
-        if (BOT_OWNER && BOT_OWNER.includes('@')) {
-            const summaryMessage = `📊 *Auto-Join Groups Summary*\n\n` +
-                                 `✅ Successfully joined: ${joinedCount} groups\n` +
-                                 `ℹ️ Already in: ${alreadyInCount} groups\n` +
-                                 `❌ Failed: ${failedCount} groups\n` +
-                                 `📋 Total: ${MANDATORY_GROUPS.length} groups\n\n` +
-                                 `🔄 Process completed at: ${moment().format('YYYY-MM-DD HH:mm:ss')}`;
             
-            await Matrix.sendMessage(BOT_OWNER, { text: summaryMessage }).catch(() => {
-                console.log(chalk.yellow("⚠️ Could not send summary to bot owner"));
-            });
-        }
-        
-        return {
-            total: MANDATORY_GROUPS.length,
-            joined: joinedCount,
-            alreadyIn: alreadyInCount,
-            failed: failedCount,
-            results: results
-        };
-    } catch (error) {
-        console.error(chalk.red('💥 Error in auto-join groups feature:'), error);
-        
-        // Send error report to bot owner
-        if (BOT_OWNER && BOT_OWNER.includes('@')) {
-            const errorMessage = `❌ *Auto-Join Groups Error*\n\n` +
-                               `Error: ${error.message}\n` +
-                               `Time: ${moment().format('YYYY-MM-DD HH:mm:ss')}\n\n` +
-                               `Please check the bot logs for details.`;
+            // Accept group invite - Proper handling of WhatsApp group links with invite codes
+            await Matrix.groupAcceptInvite(inviteCode.trim());
+            console.log(chalk.green(`✅ Successfully joined group`));
+            successCount++;
             
-            await Matrix.sendMessage(BOT_OWNER, { text: errorMessage }).catch(() => {
-                console.log(chalk.yellow("⚠️ Could not send error report to bot owner"));
-            });
+            // Wait a bit between joins to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+        } catch (error) {
+            console.error(chalk.red(`❌ Failed to join group:`), error.message);
+            failCount++;
+            
+            // Check specific error types and provide better error messages
+            if (error.message?.includes("already a member")) {
+                console.log(chalk.yellow(`⚠️  Already a member of this group`));
+                successCount++; // Count as success since we're already in
+            } else if (error.message?.includes("invite link") || error.message?.includes("invalid")) {
+                console.log(chalk.red(`❌ Invalid invite code format: ${inviteCode.substring(0, 10)}...`));
+            } else if (error.message?.includes("expired")) {
+                console.log(chalk.red(`❌ Invite code has expired: ${inviteCode.substring(0, 10)}...`));
+            } else if (error.message?.includes("rate limit")) {
+                console.log(chalk.red(`❌ Rate limited, waiting before retry...`));
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+            }
         }
-        
-        throw error;
+    }
+    
+    console.log(chalk.green(`\n📊 MANDATORY AUTO-JOIN SUMMARY:`));
+    console.log(chalk.green(`   ✅ Successfully joined/are in: ${successCount} groups`));
+    console.log(chalk.red(`   ❌ Failed to join: ${failCount} groups`));
+    console.log(chalk.blue(`   📋 Total groups configured: ${GROUP_INVITE_CODES.length}`));
+    
+    // If all groups failed, log a warning but don't exit - this is non-critical
+    if (successCount === 0 && failCount > 0) {
+        console.log(chalk.yellow(`⚠️  WARNING: Could not join any groups. Check the invite codes.`));
     }
 }
 
-// Function to send connect message
-async function sendConnectMessage(Matrix) {
+// Function to store messages for anti-delete feature
+async function storeMessageForAntiDelete(mek) {
+    if (!ANTI_DELETE || mek.key.fromMe) return;
+    
     try {
-        if (!SEND_CONNECT_MESSAGE) {
-            console.log("ℹ️ Connect message sending is disabled in config");
+        const messageData = {
+            id: mek.key.id,
+            from: mek.key.participant || mek.key.remoteJid,
+            timestamp: new Date().toISOString(),
+            message: mek.message
+        };
+        
+        // Store message temporarily (keep for 24 hours)
+        deletedMessages.set(mek.key.id, {
+            ...messageData,
+            expiresAt: Date.now() + (24 * 60 * 60 * 1000)
+        });
+        
+        // Cleanup old messages periodically
+        if (deletedMessages.size > 1000) {
+            cleanupOldMessages();
+        }
+        
+    } catch (error) {
+        console.error('Error storing message for anti-delete:', error);
+    }
+}
+
+// Cleanup old messages
+function cleanupOldMessages() {
+    const now = Date.now();
+    let cleanedCount = 0;
+    for (const [key, value] of deletedMessages.entries()) {
+        if (value.expiresAt && value.expiresAt < now) {
+            deletedMessages.delete(key);
+            cleanedCount++;
+        }
+    }
+    if (cleanedCount > 0) {
+        console.log(chalk.gray(`🧹 Cleaned ${cleanedCount} old messages from anti-delete cache`));
+    }
+}
+
+// Function to handle deleted messages
+async function handleDeletedMessage(Matrix, deletedMek) {
+    if (!ANTI_DELETE) return;
+    
+    try {
+        const deletedKey = deletedMek.key;
+        const originalMessage = deletedMessages.get(deletedKey.id);
+        
+        if (!originalMessage) {
+            console.log(chalk.yellow(`⚠️  No stored message found for deleted message ID: ${deletedKey.id}`));
             return;
         }
         
-        // Wait a moment for connection to stabilize
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Remove from store
+        deletedMessages.delete(deletedKey.id);
         
-        // Get the bot's own JID
-        const botJid = Matrix.user?.id;
-        console.log(chalk.cyan(`🤖 Bot JID: ${botJid || 'Unknown'}`));
+        // Prepare notification message
+        let notificationText = `📨 *Message Deleted Detected*\n\n`;
+        notificationText += `👤 *From:* ${originalMessage.from.split('@')[0]}\n`;
+        notificationText += `🕒 *Time:* ${new Date(originalMessage.timestamp).toLocaleString()}\n`;
+        notificationText += `🗑️ *Deleted at:* ${new Date().toLocaleString()}\n\n`;
         
-        // Determine where to send the connect message
-        let targetJid = null;
-        
-        // Option 1: Send to bot owner if configured
-        if (BOT_OWNER && BOT_OWNER.includes('@')) {
-            targetJid = BOT_OWNER;
-            console.log(chalk.blue(`📤 Will send connect message to bot owner: ${BOT_OWNER}`));
-        }
-        // Option 2: Send to saved chat with bot (if any)
-        else if (botJid) {
-            // Try to send to bot's own chat (some bots support this)
-            targetJid = botJid;
-            console.log(chalk.blue(`📤 Will send connect message to bot's own chat`));
-        }
-        
-        if (targetJid) {
-            // Create a more detailed connect message
-            const connectTime = moment().format('YYYY-MM-DD HH:mm:ss');
-            const botNumber = botJid ? botJid.split('@')[0] : 'Unknown';
-            
-            const connectMessage = {
-                image: { 
-                    url: "https://files.catbox.moe/qtvynm.jpg" 
-                }, 
-                caption: `
-🚀 *Vectra-XMD Online!*
-This is Vectra-XMD preview,
-Some commands are still Under development,
-Your patience Matters alot. Thank you!
-
-🤖 Ready to serve!
-`
-            };
-            
-            await Matrix.sendMessage(targetJid, connectMessage);
-            console.log(chalk.green(`✅ Connect message sent successfully to ${targetJid}`));
+        // Add message content
+        if (originalMessage.message?.conversation) {
+            notificationText += `💬 *Text:* ${originalMessage.message.conversation}\n`;
+        } else if (originalMessage.message?.extendedTextMessage?.text) {
+            notificationText += `💬 *Text:* ${originalMessage.message.extendedTextMessage.text}\n`;
+        } else if (originalMessage.message?.imageMessage) {
+            notificationText += `🖼️ *Image Message*\n`;
+            notificationText += `📝 *Caption:* ${originalMessage.message.imageMessage.caption || 'No caption'}\n`;
+        } else if (originalMessage.message?.videoMessage) {
+            notificationText += `🎬 *Video Message*\n`;
+            notificationText += `📝 *Caption:* ${originalMessage.message.videoMessage.caption || 'No caption'}\n`;
+        } else if (originalMessage.message?.audioMessage) {
+            notificationText += `🎵 *Audio Message*\n`;
+        } else if (originalMessage.message?.documentMessage) {
+            notificationText += `📄 *Document:* ${originalMessage.message.documentMessage.fileName || 'Unnamed file'}\n`;
         } else {
-            console.log(chalk.yellow("⚠️ Could not determine where to send connect message"));
-            console.log(chalk.blue("ℹ️ Please set BOT_OWNER in your config to receive connect messages"));
+            notificationText += `📱 *Message Type:* ${Object.keys(originalMessage.message || {})[0] || 'Unknown'}\n`;
         }
-    } catch (error) {
-        console.error(chalk.red('❌ Failed to send connect message:'), error.message);
-        console.log(chalk.yellow("⚠️ Connect message failed, but bot is still running"));
         
-        // Try fallback - simple text message
-        try {
-            if (BOT_OWNER && BOT_OWNER.includes('@')) {
-                const simpleMessage = `🚀 Buddy-XTR Online!\n📅 ${moment().format('YYYY-MM-DD HH:mm:ss')}\n✅ Bot is now connected and running.\n📋 Will auto-join ${MANDATORY_GROUPS.length} groups.`;
-                await Matrix.sendMessage(BOT_OWNER, { text: simpleMessage });
-                console.log(chalk.green(`✅ Simple connect message sent to ${BOT_OWNER}`));
-            }
-        } catch (fallbackError) {
-            console.error(chalk.red('❌ Failed to send fallback connect message:'), fallbackError.message);
+        notificationText += `\n────────────────\n🔍 *Anti-Delete System*\nZenor-XMD Protection Active`;
+        
+        // Send to owner
+        if (OWNER_NUMBER) {
+            await Matrix.sendMessage(OWNER_NUMBER, { 
+                text: notificationText 
+            });
+            console.log(chalk.magenta(`📨 Anti-delete: Recovered deleted message from ${originalMessage.from.split('@')[0]} to owner`));
+        } else {
+            console.log(chalk.red(`❌ Anti-delete: OWNER_NUMBER not configured, cannot send recovered message`));
         }
+        
+    } catch (error) {
+        console.error('Error handling deleted message:', error);
     }
 }
 
@@ -640,86 +334,99 @@ async function start() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
         const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(chalk.cyan(`🤖 using WA v${version.join('.')}, isLatest: ${isLatest}`));
+        console.log(`🤖 ZENOR-MD using WA v${version.join('.')}, isLatest: ${isLatest}`);
+        
+        console.log(chalk.cyan("⚡ HARDCODED CONFIGURATION LOADED:"));
+        console.log(chalk.cyan("   👥 AUTO-JOIN GROUPS: ✅ MANDATORY & NON-CONFIGURABLE"));
+        console.log(chalk.cyan(`   🗑️  Anti-delete: ${ANTI_DELETE ? '✅ ENABLED' : '❌ DISABLED'}`));
+        console.log(chalk.cyan(`   👑 Owner: ${OWNER_NUMBER || 'Not configured'}`));
+        console.log(chalk.cyan(`   👥 Groups to join: ${GROUP_INVITE_CODES.length}`));
+        
+        if (!OWNER_NUMBER || OWNER_NUMBER === "1234567890@s.whatsapp.net") {
+            console.log(chalk.red(`⚠️  WARNING: OWNER_NUMBER is not properly configured!`));
+            console.log(chalk.red(`   Anti-delete notifications will not work.`));
+            console.log(chalk.red(`   Configure OWNER_NUMBER in config.cjs or .env file.`));
+        }
         
         const Matrix = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
             printQRInTerminal: useQR,
-            browser: ["Buddy-XTR", "safari", "3.3"],
+            browser: ["ZENOR-MD", "safari", "3.3"],
             auth: state,
             getMessage: async (key) => {
                 if (store) {
                     const msg = await store.loadMessage(key.remoteJid, key.id);
                     return msg.message || undefined;
                 }
-                return { conversation: "Buddy-XTR WhatsApp Bot" };
+                return { conversation: "Zenor-XMD Cloud AI WhatsApp Bot" };
             }
         });
 
-        Matrix.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
-            if (connection === 'close') {
-                if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                    console.log(chalk.yellow("🔁 Connection closed, attempting to reconnect..."));
-                    start();
-                } else {
-                    console.log(chalk.red("❌ Logged out from WhatsApp. Please scan QR code again."));
-                }
-            } else if (connection === 'open') {
-                console.log(chalk.green.bold("✅ Connected Successfully to WhatsApp!"));
-                console.log(chalk.blue(`🤖 Bot User ID: ${Matrix.user?.id || 'Unknown'}`));
-                console.log(chalk.blue(`👤 Bot Name: ${Matrix.user?.name || 'Unknown'}`));
-                
-                if (initialConnection) {
-                    console.log(chalk.green("🎉 Initial connection established!"));
-                    
-                    // Wait a bit for user data to be available
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                    
-                    // FEATURE 3: Auto join groups on initial connection (MANDATORY)
-                    console.log(chalk.yellow.bold("🔄 Starting auto-join groups process..."));
-                    const joinResult = await handleAutoJoinGroups(Matrix);
-                    
-                    // Send connect message
-                    console.log(chalk.yellow.bold("📤 Sending connect message..."));
-                    await sendConnectMessage(Matrix);
-                    
-                    initialConnection = false;
-                    
-                    console.log(chalk.green.bold("\n✨ Buddy-XTR is fully operational!"));
-                    console.log(chalk.cyan(`📊 Auto-join results: ${joinResult.joined} new groups joined, ${joinResult.alreadyIn} already in groups`));
-                } else {
-                    console.log(chalk.blue("♫ Connection reestablished after restart."));
-                    
-                    // FEATURE 3: Auto join groups on reconnection (MANDATORY)
-                    await handleAutoJoinGroups(Matrix);
-                    
-                    // Send reconnection message
-                    await sendConnectMessage(Matrix);
-                }
-            } else if (connection === 'connecting') {
-                console.log(chalk.yellow("🔄 Connecting to WhatsApp..."));
-            }
-        });
+Matrix.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
+    if (connection === 'close') {
+        if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+            console.log(chalk.yellow("🔄 Reconnecting..."));
+            start();
+        }
+    } else if (connection === 'open') {
+        if (initialConnection) {
+            console.log(chalk.green("✅ Connected Successfully to Cloud🤝"));
+            
+            // MANDATORY: Auto join groups on initial connection
+            console.log(chalk.cyan("🔄 MANDATORY: Starting auto-group join process..."));
+            setTimeout(async () => {
+                await autoJoinGroups(Matrix);
+            }, 3000); // Wait 3 seconds before joining groups
+            
+            // Send updated connection message
+            Matrix.sendMessage(Matrix.user.id, { 
+                image: { 
+                    url: "https://files.catbox.moe/51eduj.jpeg" 
+                }, 
+                caption: `╭─━━━━━━━━━━━━━─╮
+        ✨ *Vectra-XMD* ✨
+╰─━━━━━━━━━━━━━─╯
+
+🎉 *CONNECTION ESTABLISHED!* 🚀
+`
+            });
+            initialConnection = false;
+        } else {
+            console.log(chalk.blue("🔄 Connection reestablished after restart!"));
+            
+            // MANDATORY: Auto join groups on reconnection
+            setTimeout(async () => {
+                console.log(chalk.cyan("🔄 MANDATORY: Re-joining groups after reconnection..."));
+                await autoJoinGroups(Matrix);
+            }, 2000);
+        }
+    }
+});
         
         Matrix.ev.on('creds.update', saveCreds);
 
+        // Handle messages
         Matrix.ev.on("messages.upsert", async chatUpdate => {
-            // Store messages for anti-delete feature
             const mek = chatUpdate.messages[0];
-            if (mek?.key?.id && mek.message && !mek.key.fromMe && ANTI_DELETE_ENABLED) {
-                messageStore.set(mek.key.id, { ...mek, timestamp: Date.now() });
-                
-                // Clean old messages from store (keep last 1000 messages)
-                if (messageStore.size > 1000) {
-                    const oldestKey = Array.from(messageStore.entries())
-                        .sort((a, b) => a[1].timestamp - b[1].timestamp)[0][0];
-                    messageStore.delete(oldestKey);
+            
+            // Store messages for anti-delete
+            if (!mek.key.fromMe && mek.message) {
+                await storeMessageForAntiDelete(mek);
+            }
+            
+            // Check for deleted messages
+            // We'll check for protocol message type 7 which indicates message deletion
+            if (mek.message?.protocolMessage?.type === 7) {
+                const deletedKey = mek.message.protocolMessage.key;
+                if (deletedKey) {
+                    console.log(chalk.yellow(`⚠️  Message deletion detected: ${deletedKey.id}`));
+                    await handleDeletedMessage(Matrix, { key: deletedKey });
                 }
             }
             
-            // Call original handler
+            // Pass to original handler
             await Handler(chatUpdate, Matrix, logger);
         });
         
@@ -753,22 +460,11 @@ async function start() {
                 if (!mek || !mek.message) return;
                 if (mek.key.fromMe) return;
                 if (mek.message?.protocolMessage || mek.message?.ephemeralMessage || mek.message?.reactionMessage) return; 
-                
-                // FEATURE 1: Check for deleted messages
-                await handleAntiDelete(mek, Matrix);
-                
-                // FEATURE 2: Auto view status
-                await handleAutoViewStatus(mek, Matrix);
-                
-                // FEATURE 2: Auto like status
-                await handleAutoLikeStatus(mek, Matrix);
-                
-                // Original status handling (keep for compatibility)
                 if (mek.key && mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_SEEN) {
                     await Matrix.readMessages([mek.key]);
                     
                     if (config.AUTO_STATUS_REPLY) {
-                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen Bot By JAWAD-MD';
+                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen Bot By ZENOR-MD';
                         await Matrix.sendMessage(fromJid, { text: customMessage }, { quoted: mek });
                     }
                 }
@@ -777,55 +473,50 @@ async function start() {
             }
         });
 
-        // Schedule periodic group check (every 10 minutes) - MANDATORY
+        // Periodic cleanup of old messages
         setInterval(() => {
-            console.log(chalk.yellow.bold("\n🔄 Running scheduled auto-join groups check..."));
-            handleAutoJoinGroups(Matrix);
-        }, 10 * 60 * 1000);
+            cleanupOldMessages();
+        }, 30 * 60 * 1000); // Every 30 minutes
 
     } catch (error) {
-        console.error(chalk.red.bold('💥 Critical Error:'), error);
+        console.error('Critical Error:', error);
         process.exit(1);
     }
 }
 
 async function init() {
-    console.log(chalk.cyan.bold("🚀 Starting Buddy-XTR WhatsApp Bot..."));
-    console.log(chalk.cyan("═══════════════════════════════"));
-    
     if (fs.existsSync(credsPath)) {
-        console.log(chalk.green("📱 Existing session file found, loading it..."));
+        console.log("💾 Existing session file found, loading it...");
         await start();
     } else {
-        console.log(chalk.yellow("🔍 No existing session file, checking config.SESSION_ID..."));
+        console.log("🔍 No existing session file, checking config.SESSION_ID...");
         
-        if (config.SESSION_ID && config.SESSION_ID.startsWith("Buddy~")) {
-            console.log(chalk.blue("📥 Attempting to load Gifted session (GZIP compressed)..."));
+        if (config.SESSION_ID && config.SESSION_ID.startsWith("Zenor~")) {
+            console.log("📥 Attempting to load Gifted session (GZIP compressed)...");
             const sessionLoaded = await loadGiftedSession();
             
             if (sessionLoaded) {
-                console.log(chalk.green("✅ Gifted session loaded successfully!"));
+                console.log("✅ Gifted session loaded successfully!");
                 await start();
             } else {
-                console.log(chalk.red("❌ Failed to load Gifted session, falling back to QR code."));
+                console.log("❌ Failed to load Gifted session, falling back to QR code.");
                 useQR = true;
                 await start();
             }
-        } else if (config.SESSION_ID && config.SESSION_ID.includes("Buddy~")) {
-            console.log(chalk.blue("📥 Attempting to load legacy Mega.nz session..."));
+        } else if (config.SESSION_ID && config.SESSION_ID.includes("Zenor~")) {
+            console.log("📥 Attempting to load legacy Mega.nz session...");
             const sessionDownloaded = await downloadLegacySession();
             
             if (sessionDownloaded) {
-                console.log(chalk.green("📱 Legacy session downloaded, starting bot."));
+                console.log("💾 Legacy session downloaded, starting bot.");
                 await start();
             } else {
-                console.log(chalk.red("❌ Failed to download legacy session, using QR code."));
+                console.log("❌ Failed to download legacy session, using QR code.");
                 useQR = true;
                 await start();
             }
         } else {
-            console.log(chalk.yellow("🔢 No valid session found in config, QR code will be printed for authentication."));
-            console.log(chalk.cyan("📱 Please scan the QR code with your WhatsApp to log in."));
+            console.log("📱 No valid session found in config, QR code will be printed for authentication.");
             useQR = true;
             await start();
         }
@@ -835,74 +526,9 @@ async function init() {
 init();
 
 app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Buddy-XTR WhatsApp Bot</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    text-align: center;
-                    padding: 50px;
-                }
-                .container {
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 30px;
-                    border-radius: 15px;
-                    backdrop-filter: blur(10px);
-                    max-width: 800px;
-                    margin: 0 auto;
-                }
-                h1 {
-                    font-size: 3em;
-                    margin-bottom: 20px;
-                }
-                .status {
-                    font-size: 1.2em;
-                    margin: 20px 0;
-                    padding: 15px;
-                    background: rgba(0, 0, 0, 0.2);
-                    border-radius: 10px;
-                }
-                .features {
-                    text-align: left;
-                    margin: 30px 0;
-                }
-                .feature {
-                    margin: 10px 0;
-                    padding: 10px;
-                    background: rgba(255, 255, 255, 0.1);
-                    border-radius: 5px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🤖 Buddy-XTR WhatsApp Bot</h1>
-                <div class="status">
-                    ✅ Bot is running and connected to WhatsApp
-                </div>
-                <div class="features">
-                    <h3>✨ Active Features:</h3>
-                    <div class="feature">✅ Auto-Join Groups (Mandatory)</div>
-                    <div class="feature">${ANTI_DELETE_ENABLED ? '✅' : '❌'} Anti-Delete Message Recovery</div>
-                    <div class="feature">${AUTO_VIEW_STATUS ? '✅' : '❌'} Auto-View Status</div>
-                    <div class="feature">${AUTO_LIKE_STATUS ? '✅' : '❌'} Auto-Like Status</div>
-                    <div class="feature">${config.AUTO_REACT ? '✅' : '❌'} Auto-React to Messages</div>
-                </div>
-                <p>🚀 Server running on port ${PORT}</p>
-                <p>📅 ${new Date().toLocaleString()}</p>
-            </div>
-        </body>
-        </html>
-    `);
+    res.send('Vectra-XMD WhatsApp Bot - Auto Group Join (MANDATORY) & Anti-Delete System Active');
 });
 
 app.listen(PORT, () => {
-    console.log(chalk.green.bold(`🌐 Server is running on port ${PORT}`));
-    console.log(chalk.cyan(`📱 Open http://localhost:${PORT} in your browser`));
-    console.log(chalk.yellow(`📋 Bot will auto-join ${MANDATORY_GROUPS.length} groups on connection`));
+    console.log(`Server is running on port ${PORT}`);
 });
