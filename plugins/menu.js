@@ -68,7 +68,7 @@ const menu = async (m, Matrix) => {
 
   if (validCommands.includes(cmd)) {
     const mainMenu = `
-╭━━━〔 *${config.BOT_NAME}* 〕━━━┈⊷
+╭━━━〔 *Vectra-XMD* 〕━━━┈⊷
 ┃★╭──────────────
 ┃★│ Owner : *${config.OWNER_NAME}*
 ┃★│ User : *${m.pushName}*
@@ -81,7 +81,7 @@ const menu = async (m, Matrix) => {
 ┃★╰──────────────
 ╰━━━━━━━━━━━━━━━┈⊷
 
-> ${pushwish} *${m.pushName}*!
+> Ssup! *${m.pushName}*!
 
 ╭━━〔 *Menu List* 〕━━┈⊷
 ┃◈╭─────────────·๏
@@ -125,7 +125,7 @@ const menu = async (m, Matrix) => {
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
           newsletterJid: '120363398040175935@newsletter',
-          newsletterName: "JawadTechX",
+          newsletterName: "Vectra-XMD",
           serverMessageId: 143
         }
       }
@@ -135,7 +135,7 @@ const menu = async (m, Matrix) => {
 
     // Send audio after sending the menu
     await Matrix.sendMessage(m.from, {
-      audio: { url: 'https://github.com/XdTechPro/KHAN-DATA/raw/refs/heads/main/autovoice/menunew.m4a' },
+      audio: { url: 'https://github.com//raw/refs/heads/main/autovoice/menunew.m4a' },
       mimetype: 'audio/mp4',
       ptt: true
     }, { quoted: m });
@@ -332,7 +332,7 @@ const menu = async (m, Matrix) => {
 
 ${menuResponse}
 
-> *${config.DESCRIPTION}*`;
+> Vectra-XMD`;
 
       // Send the response with image and context info
       await Matrix.sendMessage(m.from, {
@@ -344,7 +344,7 @@ ${menuResponse}
           isForwarded: true,
           forwardedNewsletterMessageInfo: {
             newsletterJid: '120363398040175935@newsletter',
-            newsletterName: "JawadTechX",
+            newsletterName: "Vectra-XMD",
             serverMessageId: 143
           }
         }
