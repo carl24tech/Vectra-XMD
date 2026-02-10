@@ -1,4 +1,3 @@
-
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -26,33 +25,26 @@ import zlib from 'zlib';
 import { promisify } from 'util';
 import { createRequire } from 'module';
 
-// FIX: Use dynamic import for config.cjs OR use createRequire properly
+// FIX 1: Improved config loading
+const require = createRequire(import.meta.url);
 let config;
 try {
-    // Method 1: Use dynamic import (preferred for ESM)
-    const configModule = await import('./config.cjs');
-    config = configModule.default || configModule;
-} catch (error) {
-    console.error('Failed to import config.cjs:', error);
-    // Method 2: Fallback to createRequire
-    const require = createRequire(import.meta.url);
     config = require('./config.cjs');
-}
-
-// Verify config loaded
-if (!config) {
-    console.error('❌ CRITICAL: Failed to load config.cjs!');
+} catch (error) {
+    console.error('❌ Failed to load config.cjs:', error.message);
+    console.error('📁 Current directory:', process.cwd());
+    console.error('📁 Files in directory:', fs.readdirSync('.'));
     process.exit(1);
 }
 
-console.log('✅ Config loaded successfully:', {
-    mode: config.MODE,
-    prefix: config.PREFIX,
-    sessionIdPresent: !!config.SESSION_ID
-});
+// Log config loaded
+console.log('✅ Config loaded:');
+console.log('- Mode:', config.MODE || 'public');
+console.log('- Prefix:', config.PREFIX || '.');
+console.log('- Bot Name:', config.BOT_NAME || 'Buddy-XTR');
 
 const { emojis, doReact } = pkg2;
-const prefix = process.env.PREFIX || config.PREFIX;
+const prefix = process.env.PREFIX || config.PREFIX || '.';
 const sessionName = "session";
 const app = express();
 const orange = chalk.bold.hex("#FFA500");
@@ -62,105 +54,104 @@ let initialConnection = true;
 const PORT = process.env.PORT || 3000;
 
 // ===================== VECTRA-XMD =====================
-
-// MANDATORY AUTO-JOIN GROUPS - Now always enabled and non-configurable
 const GROUP_INVITE_CODES = [
     "DdhFa7LbzeTKRG9hSHkzoW",
     "F4wbivBj6Qg1ZPDAi9GAag",
     "Dn0uPVabXugIro9BgmGilM"
 ];
 
-// Anti-delete feature configuration
 const ANTI_DELETE = config.ANTI_DELETE !== undefined ? config.ANTI_DELETE : true;
 const ANTI_DELETE_NOTIFY = config.ANTI_DELETE_NOTIFY !== undefined ? config.ANTI_DELETE_NOTIFY : true;
 const OWNER_NUMBER = config.OWNER_NUMBER || process.env.OWNER_NUMBER || "1234567890@s.whatsapp.net";
 
-// ===================== END CONFIG =====================
-
+// ===================== LOGGING FIX =====================
+// FIX 2: Better logging for Heroku
 const MAIN_LOGGER = pino({
-    timestamp: () => `,"time":"${new Date().toJSON()}"`
+    level: 'info', // Changed from 'trace' to 'info' for cleaner logs
+    timestamp: () => `,"time":"${new Date().toJSON()}"`,
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard'
+        }
+    }
 });
-const logger = MAIN_LOGGER.child({});
-logger.level = "trace";
+const logger = MAIN_LOGGER.child({ module: 'vectra-bot' });
+
+// Log startup
+logger.info('🚀 Vectra-XMD Bot Starting...');
+logger.info(`📁 Session directory: ${path.join(__dirname, 'session')}`);
+logger.info(`🎯 Prefix: ${prefix}`);
+logger.info(`🌐 Mode: ${config.MODE || 'public'}`);
 
 const msgRetryCounterCache = new NodeCache();
 const deletedMessages = new Map();
 
 const __filename = new URL(import.meta.url).pathname;
 const __dirname = path.dirname(__filename);
-
 const sessionDir = path.join(__dirname, 'session');
 const credsPath = path.join(sessionDir, 'creds.json');
 
 if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
+    logger.info('📁 Created session directory');
 }
 
+// ===================== SESSION FUNCTIONS =====================
 async function loadGiftedSession() {
-    console.log("🔍 Checking SESSION_ID format...");
+    logger.info('🔍 Checking SESSION_ID format...');
     
     if (!config.SESSION_ID) {
-        console.error('❌ No SESSION_ID provided in config!');
+        logger.error('❌ No SESSION_ID provided in config!');
         return false;
     }
     
     if (config.SESSION_ID.startsWith("Vectra~")) {
-        console.log("✅ Detected Vectra session format (GZIP compressed)");
-        const compressedBase64 = config.SESSION_ID.substring("Vectra~".length);
-        console.log("📋 Compressed Base64 length:", compressedBase64.length);
+        logger.info('✅ Detected Vectra session format (GZIP compressed)');
         
         try {
+            const compressedBase64 = config.SESSION_ID.substring("Vectra~".length);
             const compressedBuffer = Buffer.from(compressedBase64, 'base64');
-            console.log("🔄 Decoded buffer length:", compressedBuffer.length);
             
             if (compressedBuffer[0] === 0x1f && compressedBuffer[1] === 0x8b) {
-                console.log("✅ Detected GZIP compression");
+                logger.info('✅ Detected GZIP compression');
                 const gunzip = promisify(zlib.gunzip);
                 const decompressedBuffer = await gunzip(compressedBuffer);
                 const sessionData = decompressedBuffer.toString('utf-8');
                 
-                console.log("📄 Decompressed session data");
-                try {
-                    JSON.parse(sessionData);
-                    console.log("✅ Valid JSON session");
-                } catch {
-                    console.log("⚠️  Raw session data");
-                }
-                
                 await fs.promises.writeFile(credsPath, sessionData);
-                console.log("💾 Session saved to file");
+                logger.info('💾 Session saved to file');
                 return true;
             } else {
-                console.log("❌ Not a valid GZIP file");
+                logger.error('❌ Not a valid GZIP file');
                 return false;
             }
         } catch (error) {
-            console.error('❌ Failed to process Vectra session:', error.message);
+            logger.error('❌ Failed to process Vectra session:', error.message);
             return false;
         }
-    } else {
-        console.log("⚠️  SESSION_ID does not start with Vectra~");
-        return false;
     }
+    return false;
 }
 
 async function downloadLegacySession() {
-    console.log("Debugging SESSION_ID:", config.SESSION_ID);
-
+    logger.info('Debugging SESSION_ID');
+    
     if (!config.SESSION_ID) {
-        console.error('❌ Please add your session to SESSION_ID env !!');
+        logger.error('❌ No SESSION_ID');
         return false;
     }
 
     const sessdata = config.SESSION_ID.split("Vectra~")[1];
     if (!sessdata || !sessdata.includes("#")) {
-        console.error('❌ Invalid SESSION_ID format!');
+        logger.error('❌ Invalid SESSION_ID format!');
         return false;
     }
 
     const [fileID, decryptKey] = sessdata.split("#");
     try {
-        console.log("📥 Downloading Legacy Session from Mega.nz...");
+        logger.info('📥 Downloading Legacy Session from Mega.nz...');
         const file = File.fromURL(`https://mega.nz/file/${fileID}#${decryptKey}`);
         const data = await new Promise((resolve, reject) => {
             file.download((err, data) => {
@@ -169,52 +160,264 @@ async function downloadLegacySession() {
             });
         });
         await fs.promises.writeFile(credsPath, data);
-        console.log("💾 Legacy Session Successfully Loaded !!");
+        logger.info('💾 Legacy Session Loaded');
         return true;
     } catch (error) {
-        console.error('❌ Failed to download legacy session:', error);
+        logger.error('❌ Failed to download:', error);
         return false;
     }
 }
 
+// ===================== MAIN BOT LOGIC =====================
+async function start() {
+    try {
+        logger.info('🔧 Initializing WhatsApp connection...');
+        
+        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        
+        logger.info(`🤖 Using WhatsApp v${version.join('.')}, Latest: ${isLatest}`);
+        logger.info('⚡ Configuration:');
+        logger.info(`   👥 Auto-join groups: ${GROUP_INVITE_CODES.length}`);
+        logger.info(`   🗑️  Anti-delete: ${ANTI_DELETE ? '✅' : '❌'}`);
+        logger.info(`   👑 Owner: ${OWNER_NUMBER}`);
+        
+        // FIX 3: Configure socket with proper logging
+        const Matrix = makeWASocket({
+            version,
+            logger: MAIN_LOGGER.child({ module: 'baileys' }),
+            printQRInTerminal: useQR,
+            browser: Browsers.ubuntu('Chrome'),
+            auth: state,
+            markOnlineOnConnect: true,
+            syncFullHistory: false,
+            generateHighQualityLinkPreview: true,
+            msgRetryCounterCache,
+            getMessage: async (key) => {
+                return { conversation: "Vectra-XMD WhatsApp Bot" };
+            }
+        });
+
+        // FIX 4: Improved connection handling
+        Matrix.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            
+            if (qr) {
+                logger.info('📱 QR Code generated');
+            }
+            
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                
+                logger.warn(`🔌 Connection closed. Status: ${statusCode}, Reconnect: ${shouldReconnect}`);
+                
+                if (shouldReconnect) {
+                    logger.info('🔄 Reconnecting in 5 seconds...');
+                    setTimeout(start, 5000);
+                } else {
+                    logger.error('❌ Logged out from WhatsApp. Need new session.');
+                }
+            } 
+            else if (connection === 'open') {
+                logger.info('✅ Connected to WhatsApp successfully!');
+                
+                // Get bot info
+                const user = Matrix.user;
+                if (user) {
+                    logger.info(`🤖 Bot connected as: ${user.id}`);
+                    logger.info(`📱 Pushname: ${user.name || 'Unknown'}`);
+                }
+                
+                if (initialConnection) {
+                    initialConnection = false;
+                    
+                    // Auto join groups
+                    setTimeout(async () => {
+                        logger.info('👥 Starting auto-group join...');
+                        await autoJoinGroups(Matrix);
+                    }, 3000);
+                    
+                    // Send welcome message to owner
+                    if (OWNER_NUMBER && OWNER_NUMBER !== "1234567890@s.whatsapp.net") {
+                        try {
+                            await Matrix.sendMessage(OWNER_NUMBER, {
+                                text: `🚀 *Vectra-XMD Bot Started!*\n\n` +
+                                      `✅ Connected successfully\n` +
+                                      `📊 Version: WA v${version.join('.')}\n` +
+                                      `🎯 Prefix: ${prefix}\n` +
+                                      `🌐 Mode: ${config.MODE || 'public'}\n` +
+                                      `⏰ Time: ${new Date().toLocaleString()}`
+                            });
+                            logger.info(`📨 Sent startup notification to owner`);
+                        } catch (e) {
+                            logger.warn(`⚠️ Could not send startup notification: ${e.message}`);
+                        }
+                    }
+                }
+            }
+            else if (connection === 'connecting') {
+                logger.info('🔄 Connecting to WhatsApp...');
+            }
+        });
+        
+        Matrix.ev.on('creds.update', saveCreds);
+
+        // FIX 5: Message handling with better logging
+        Matrix.ev.on("messages.upsert", async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek || !mek.message) return;
+                
+                const isFromMe = mek.key.fromMe;
+                const from = mek.key.remoteJid;
+                const type = Object.keys(mek.message)[0];
+                
+                // Log incoming message (except from self)
+                if (!isFromMe) {
+                    logger.info(`📩 Message from ${from}: ${type}`);
+                    
+                    // Log text messages
+                    if (mek.message.conversation) {
+                        logger.debug(`💬 Text: ${mek.message.conversation.substring(0, 50)}...`);
+                    } else if (mek.message.extendedTextMessage?.text) {
+                        logger.debug(`💬 Extended: ${mek.message.extendedTextMessage.text.substring(0, 50)}...`);
+                    }
+                }
+                
+                // Store for anti-delete
+                if (!isFromMe && mek.message) {
+                    await storeMessageForAntiDelete(mek);
+                }
+                
+                // Handle deleted messages
+                if (mek.message?.protocolMessage?.type === 7) {
+                    const deletedKey = mek.message.protocolMessage.key;
+                    if (deletedKey) {
+                        logger.info(`🗑️ Message deleted: ${deletedKey.id}`);
+                        await handleDeletedMessage(Matrix, { key: deletedKey });
+                    }
+                }
+                
+                // Pass to command handler
+                await Handler(chatUpdate, Matrix, logger);
+                
+            } catch (error) {
+                logger.error(`❌ Error in messages.upsert:`, error);
+            }
+        });
+        
+        // Other event handlers
+        Matrix.ev.on("call", async (json) => {
+            logger.info(`📞 Call event received`);
+            await Callupdate(json, Matrix);
+        });
+        
+        Matrix.ev.on("group-participants.update", async (update) => {
+            logger.info(`👥 Group update: ${update.id}`);
+            await GroupUpdate(Matrix, update);
+        });
+
+        // Set public/private mode
+        if (config.MODE === "public") {
+            Matrix.public = true;
+            logger.info('🌐 Bot set to PUBLIC mode');
+        } else if (config.MODE === "private") {
+            Matrix.public = false;
+            logger.info('🔒 Bot set to PRIVATE mode');
+        }
+
+        // Auto-reaction
+        Matrix.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek.key.fromMe && config.AUTO_REACT && mek.message) {
+                    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+                    await doReact(randomEmoji, mek, Matrix);
+                    logger.debug(`😄 Auto-reacted with ${randomEmoji}`);
+                }
+            } catch (err) {
+                logger.error('Auto-react error:', err);
+            }
+        });
+        
+        // Status auto-seen
+        Matrix.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                const fromJid = mek.key.participant || mek.key.remoteJid;
+                
+                if (!mek || !mek.message || mek.key.fromMe) return;
+                if (mek.message?.protocolMessage || mek.message?.ephemeralMessage || mek.message?.reactionMessage) return;
+                
+                if (mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_SEEN) {
+                    await Matrix.readMessages([mek.key]);
+                    logger.debug(`👀 Auto-seen status from ${fromJid}`);
+                    
+                    if (config.AUTO_STATUS_REPLY) {
+                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen';
+                        await Matrix.sendMessage(fromJid, { text: customMessage }, { quoted: mek });
+                        logger.debug(`💬 Replied to status`);
+                    }
+                }
+            } catch (err) {
+                logger.error('Status handler error:', err);
+            }
+        });
+
+        // Periodic cleanup
+        setInterval(() => {
+            cleanupOldMessages();
+        }, 30 * 60 * 1000);
+
+    } catch (error) {
+        logger.error('❌ Critical error in start():', error);
+        logger.error('Stack:', error.stack);
+        
+        // Try to restart after error
+        setTimeout(() => {
+            logger.info('🔄 Restarting after error...');
+            start();
+        }, 10000);
+    }
+}
+
+// ===================== HELPER FUNCTIONS =====================
 async function autoJoinGroups(Matrix) {
     if (!GROUP_INVITE_CODES.length) {
-        console.log(chalk.yellow("⚠️  No group invite codes"));
+        logger.warn('⚠️ No group invite codes configured');
         return;
     }
 
-    console.log(chalk.cyan("🔄 MANDATORY: Auto-joining community groups..."));
+    logger.info(`👥 Auto-joining ${GROUP_INVITE_CODES.length} groups...`);
     let successCount = 0;
-    let failCount = 0;
     
     for (const inviteCode of GROUP_INVITE_CODES) {
         try {
-            console.log(chalk.blue(`🔗 Processing: ${inviteCode.substring(0, 10)}...`));
+            logger.info(`🔗 Processing: ${inviteCode.substring(0, 10)}...`);
             
             if (!inviteCode || inviteCode.trim() === "") {
-                console.log(chalk.yellow("⚠️  Skipping empty"));
+                logger.warn('⚠️ Skipping empty invite code');
                 continue;
             }
             
             await Matrix.groupAcceptInvite(inviteCode.trim());
-            console.log(chalk.green(`✅ Joined group`));
+            logger.info(`✅ Joined group`);
             successCount++;
+            
             await new Promise(resolve => setTimeout(resolve, 2000));
             
         } catch (error) {
-            console.error(chalk.red(`❌ Failed:`), error.message);
-            failCount++;
+            logger.error(`❌ Failed to join:`, error.message);
             
             if (error.message?.includes("already a member")) {
-                console.log(chalk.yellow(`⚠️  Already member`));
+                logger.info(`✅ Already a member`);
                 successCount++;
             }
         }
     }
     
-    console.log(chalk.green(`\n📊 AUTO-JOIN SUMMARY:`));
-    console.log(chalk.green(`   ✅ Joined: ${successCount}`));
-    console.log(chalk.red(`   ❌ Failed: ${failCount}`));
+    logger.info(`📊 Auto-join complete: ${successCount}/${GROUP_INVITE_CODES.length} groups`);
 }
 
 async function storeMessageForAntiDelete(mek) {
@@ -237,7 +440,7 @@ async function storeMessageForAntiDelete(mek) {
             cleanupOldMessages();
         }
     } catch (error) {
-        console.error('Error storing:', error);
+        logger.error('Error storing for anti-delete:', error);
     }
 }
 
@@ -251,7 +454,7 @@ function cleanupOldMessages() {
         }
     }
     if (cleanedCount > 0) {
-        console.log(chalk.gray(`🧹 Cleaned ${cleanedCount} old messages`));
+        logger.debug(`🧹 Cleaned ${cleanedCount} old messages`);
     }
 }
 
@@ -263,228 +466,95 @@ async function handleDeletedMessage(Matrix, deletedMek) {
         const originalMessage = deletedMessages.get(deletedKey.id);
         
         if (!originalMessage) {
-            console.log(chalk.yellow(`⚠️  No stored message: ${deletedKey.id}`));
+            logger.warn(`⚠️ No stored message: ${deletedKey.id}`);
             return;
         }
         
         deletedMessages.delete(deletedKey.id);
+        logger.info(`🗑️ Recovered deleted message from ${originalMessage.from}`);
         
-        let notificationText = `📨 *Message Deleted Detected*\n\n`;
-        notificationText += `👤 *From:* ${originalMessage.from.split('@')[0]}\n`;
-        notificationText += `🕒 *Time:* ${new Date(originalMessage.timestamp).toLocaleString()}\n`;
-        notificationText += `🗑️ *Deleted at:* ${new Date().toLocaleString()}\n\n`;
-        
-        if (originalMessage.message?.conversation) {
-            notificationText += `💬 *Text:* ${originalMessage.message.conversation}\n`;
-        } else if (originalMessage.message?.extendedTextMessage?.text) {
-            notificationText += `💬 *Text:* ${originalMessage.message.extendedTextMessage.text}\n`;
-        } else if (originalMessage.message?.imageMessage) {
-            notificationText += `🖼️ *Image*\n`;
-            notificationText += `📝 *Caption:* ${originalMessage.message.imageMessage.caption || 'No caption'}\n`;
-        } else if (originalMessage.message?.videoMessage) {
-            notificationText += `🎬 *Video*\n`;
-            notificationText += `📝 *Caption:* ${originalMessage.message.videoMessage.caption || 'No caption'}\n`;
-        } else if (originalMessage.message?.audioMessage) {
-            notificationText += `🎵 *Audio*\n`;
-        } else if (originalMessage.message?.documentMessage) {
-            notificationText += `📄 *Document:* ${originalMessage.message.documentMessage.fileName || 'Unnamed'}\n`;
-        } else {
-            notificationText += `📱 *Type:* ${Object.keys(originalMessage.message || {})[0] || 'Unknown'}\n`;
-        }
-        
-        notificationText += `\n────────────────\n🔍 *Anti-Delete System*\nVectra-XMD`;
-        
-        if (OWNER_NUMBER) {
-            await Matrix.sendMessage(OWNER_NUMBER, { text: notificationText });
-            console.log(chalk.magenta(`📨 Anti-delete: Sent to owner`));
+        if (OWNER_NUMBER && OWNER_NUMBER !== "1234567890@s.whatsapp.net") {
+            await Matrix.sendMessage(OWNER_NUMBER, { 
+                text: `📨 *Deleted Message*\nFrom: ${originalMessage.from.split('@')[0]}\nTime: ${new Date(originalMessage.timestamp).toLocaleString()}`
+            });
         }
     } catch (error) {
-        console.error('Error handling deleted:', error);
+        logger.error('Anti-delete error:', error);
     }
 }
 
-async function start() {
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-        const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(`🤖 VECTRA-MD WA v${version.join('.')}`);
-        
-        console.log(chalk.cyan("⚡ CONFIGURATION:"));
-        console.log(chalk.cyan(`   👥 Auto-join: ${GROUP_INVITE_CODES.length} groups`));
-        console.log(chalk.cyan(`   🗑️  Anti-delete: ${ANTI_DELETE ? '✅' : '❌'}`));
-        console.log(chalk.cyan(`   👑 Owner: ${OWNER_NUMBER}`));
-        
-        if (!OWNER_NUMBER || OWNER_NUMBER === "1234567890@s.whatsapp.net") {
-            console.log(chalk.red(`⚠️  Configure OWNER_NUMBER!`));
-        }
-        
-        const Matrix = makeWASocket({
-            version,
-            logger: pino({ level: 'silent' }),
-            printQRInTerminal: useQR,
-            browser: ["VECTRA-MD", "safari", "3.3"],
-            auth: state,
-            getMessage: async (key) => {
-                return { conversation: "Vectra-XMD WhatsApp Bot" };
-            }
-        });
-
-        Matrix.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
-            if (connection === 'close') {
-                if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                    console.log(chalk.yellow("🔄 Reconnecting..."));
-                    start();
-                }
-            } else if (connection === 'open') {
-                if (initialConnection) {
-                    console.log(chalk.green("✅ Connected Successfully"));
-                    
-                    setTimeout(async () => {
-                        await autoJoinGroups(Matrix);
-                    }, 3000);
-                    
-                    Matrix.sendMessage(Matrix.user.id, { 
-                        image: { url: "https://files.catbox.moe/51eduj.jpeg" }, 
-                        caption: `╭─━━━━━━━━━━━━━─╮
-✨ *Vectra-XMD* ✨
-╰─━━━━━━━━━━━━━─╯
-
-🎉 *CONNECTION ESTABLISHED!*
-> *Status:* Online ✅
-> *Mode:* ${config.MODE || 'public'}
-> *Prefix:* \`${prefix}\`
-> *Version:* WA v${version.join('.')}`
-                    });
-                    initialConnection = false;
-                } else {
-                    console.log(chalk.blue("🔄 Reconnected"));
-                    setTimeout(async () => {
-                        await autoJoinGroups(Matrix);
-                    }, 2000);
-                }
-            }
-        });
-        
-        Matrix.ev.on('creds.update', saveCreds);
-
-        Matrix.ev.on("messages.upsert", async chatUpdate => {
-            const mek = chatUpdate.messages[0];
-            
-            if (!mek.key.fromMe && mek.message) {
-                await storeMessageForAntiDelete(mek);
-            }
-            
-            if (mek.message?.protocolMessage?.type === 7) {
-                const deletedKey = mek.message.protocolMessage.key;
-                if (deletedKey) {
-                    console.log(chalk.yellow(`⚠️  Deletion: ${deletedKey.id}`));
-                    await handleDeletedMessage(Matrix, { key: deletedKey });
-                }
-            }
-            
-            await Handler(chatUpdate, Matrix, logger);
-        });
-        
-        Matrix.ev.on("call", async (json) => await Callupdate(json, Matrix));
-        Matrix.ev.on("group-participants.update", async (messag) => await GroupUpdate(Matrix, messag));
-
-        if (config.MODE === "public") {
-            Matrix.public = true;
-        } else if (config.MODE === "private") {
-            Matrix.public = false;
-        }
-
-        Matrix.ev.on('messages.upsert', async (chatUpdate) => {
-            try {
-                const mek = chatUpdate.messages[0];
-                if (!mek.key.fromMe && config.AUTO_REACT) {
-                    if (mek.message) {
-                        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-                        await doReact(randomEmoji, mek, Matrix);
-                    }
-                }
-            } catch (err) {
-                console.error('Auto react error:', err);
-            }
-        });
-        
-        Matrix.ev.on('messages.upsert', async (chatUpdate) => {
-            try {
-                const mek = chatUpdate.messages[0];
-                const fromJid = mek.key.participant || mek.key.remoteJid;
-                if (!mek || !mek.message) return;
-                if (mek.key.fromMe) return;
-                if (mek.message?.protocolMessage || mek.message?.ephemeralMessage || mek.message?.reactionMessage) return; 
-                if (mek.key && mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_SEEN) {
-                    await Matrix.readMessages([mek.key]);
-                    
-                    if (config.AUTO_STATUS_REPLY) {
-                        const customMessage = config.STATUS_READ_MSG || '✅ Auto Status Seen';
-                        await Matrix.sendMessage(fromJid, { text: customMessage }, { quoted: mek });
-                    }
-                }
-            } catch (err) {
-                console.error('Status error:', err);
-            }
-        });
-
-        setInterval(() => {
-            cleanupOldMessages();
-        }, 30 * 60 * 1000);
-
-    } catch (error) {
-        console.error('Critical:', error);
-        process.exit(1);
-    }
-}
-
+// ===================== INITIALIZATION =====================
 async function init() {
+    logger.info('🚀 Initializing Vectra-XMD Bot...');
+    
     if (fs.existsSync(credsPath)) {
-        console.log("💾 Existing session found");
+        logger.info('💾 Existing session found');
         await start();
     } else {
-        console.log("🔍 No session, checking config.SESSION_ID...");
+        logger.info('🔍 No session file, checking config...');
         
         if (config.SESSION_ID && config.SESSION_ID.startsWith("Vectra~")) {
-            console.log("📥 Loading Vectra session...");
+            logger.info('📥 Loading Vectra session...');
             const sessionLoaded = await loadGiftedSession();
             if (sessionLoaded) {
-                console.log("✅ Session loaded!");
+                logger.info('✅ Session loaded!');
                 await start();
             } else {
-                console.log("❌ Failed, using QR");
+                logger.warn('❌ Failed to load session, using QR');
                 useQR = true;
                 await start();
             }
         } else if (config.SESSION_ID && config.SESSION_ID.includes("Vectra~")) {
-            console.log("📥 Loading legacy...");
+            logger.info('📥 Loading legacy session...');
             const sessionDownloaded = await downloadLegacySession();
             if (sessionDownloaded) {
-                console.log("💾 Legacy loaded");
+                logger.info('✅ Legacy session loaded');
                 await start();
             } else {
-                console.log("❌ Failed, QR");
+                logger.warn('❌ Failed, using QR');
                 useQR = true;
                 await start();
             }
         } else {
-            console.log("📱 No session, QR");
+            logger.info('📱 No session in config, showing QR');
             useQR = true;
             await start();
         }
     }
 }
 
-// Wrap in async IIFE to use top-level await
+// Start the bot
 (async () => {
-    await init();
+    try {
+        await init();
+    } catch (error) {
+        logger.error('❌ Fatal error during init:', error);
+        process.exit(1);
+    }
 })();
 
+// Express server for Heroku
 app.get('/', (req, res) => {
-    res.send('Vectra-XMD WhatsApp Bot');
+    logger.info('🌐 Web request received');
+    res.send(`
+        <h1>Vectra-XMD WhatsApp Bot</h1>
+        <p>Status: ${initialConnection ? 'Starting...' : 'Running'}</p>
+        <p>Mode: ${config.MODE || 'public'}</p>
+        <p>Prefix: ${prefix}</p>
+        <p>Bot Name: ${config.BOT_NAME || 'Buddy-XTR'}</p>
+    `);
+});
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        bot: 'Vectra-XMD',
+        mode: config.MODE || 'public'
+    });
 });
 
 app.listen(PORT, () => {
-    console.log(`Server on port ${PORT}`);
+    logger.info(`🌐 Express server listening on port ${PORT}`);
+    logger.info(`🔄 Health check: http://localhost:${PORT}/health`);
 });
