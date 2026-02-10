@@ -36,13 +36,35 @@ try {
     process.exit(1);
 }
 
-// Log config loaded - SIMPLE CONSOLE LOGS
-console.log('🚀 Vectra-XMD Bot Starting...');
-console.log('✅ Config loaded:');
-console.log('- Mode:', config.MODE || 'public');
-console.log('- Prefix:', config.PREFIX || '.');
-console.log('- Bot Name:', config.BOT_NAME || 'Buddy-XTR');
-console.log('- Session ID present:', !!config.SESSION_ID);
+// Simple console logging for our own logs
+function log(type, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const prefix = type === 'info' ? 'ℹ️' : 
+                   type === 'error' ? '❌' : 
+                   type === 'warn' ? '⚠️' : 
+                   type === 'debug' ? '🔍' : '📝';
+    
+    console.log(`${timestamp} ${prefix} ${message}`);
+    if (data) {
+        console.log('   Data:', typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+    }
+}
+
+// Create console logger for our app
+const consoleLogger = {
+    info: (msg, data) => log('info', msg, data),
+    error: (msg, data) => log('error', msg, data),
+    warn: (msg, data) => log('warn', msg, data),
+    debug: (msg, data) => log('debug', msg, data)
+};
+
+consoleLogger.info('🚀 Vectra-XMD Bot Starting...');
+consoleLogger.info('✅ Config loaded:', {
+    mode: config.MODE || 'public',
+    prefix: config.PREFIX || '.',
+    botName: config.BOT_NAME || 'Buddy-XTR',
+    hasSession: !!config.SESSION_ID
+});
 
 const { emojis, doReact } = pkg2;
 const prefix = process.env.PREFIX || config.PREFIX || '.';
@@ -65,28 +87,15 @@ const ANTI_DELETE = config.ANTI_DELETE !== undefined ? config.ANTI_DELETE : true
 const ANTI_DELETE_NOTIFY = config.ANTI_DELETE_NOTIFY !== undefined ? config.ANTI_DELETE_NOTIFY : true;
 const OWNER_NUMBER = config.OWNER_NUMBER || process.env.OWNER_NUMBER || "1234567890@s.whatsapp.net";
 
-// ===================== SIMPLE LOGGING =====================
-// Simple logging function that works everywhere
-function log(type, message, data = null) {
-    const timestamp = new Date().toISOString();
-    const prefix = type === 'info' ? 'ℹ️' : 
-                   type === 'error' ? '❌' : 
-                   type === 'warn' ? '⚠️' : 
-                   type === 'debug' ? '🔍' : '📝';
-    
-    console.log(`${timestamp} ${prefix} ${message}`);
-    if (data) {
-        console.log('   Data:', typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
-    }
-}
+// ===================== PROPER PINO LOGGER =====================
+// Create a proper pino logger for baileys
+const baileysLogger = pino({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    timestamp: () => `,"time":"${new Date().toJSON()}"`
+}).child({ module: 'baileys' });
 
-// Create simple logger object
-const logger = {
-    info: (msg, data) => log('info', msg, data),
-    error: (msg, data) => log('error', msg, data),
-    warn: (msg, data) => log('warn', msg, data),
-    debug: (msg, data) => log('debug', msg, data)
-};
+// But we'll use our console logger for our own logs
+const logger = consoleLogger;
 
 const msgRetryCounterCache = new NodeCache();
 const deletedMessages = new Map();
@@ -183,13 +192,14 @@ async function start() {
         logger.info('Configuration:', {
             autoJoinGroups: GROUP_INVITE_CODES.length,
             antiDelete: ANTI_DELETE,
-            owner: OWNER_NUMBER
+            owner: OWNER_NUMBER,
+            mode: config.MODE || 'public'
         });
         
-        // Create WhatsApp socket - SIMPLIFIED LOGGING
+        // Create WhatsApp socket with PROPER pino logger
         const Matrix = makeWASocket({
             version,
-            logger: { level: 'silent' }, // Disable baileys internal logging
+            logger: baileysLogger, // Use proper pino logger
             printQRInTerminal: useQR,
             browser: Browsers.ubuntu('Chrome'),
             auth: state,
@@ -261,7 +271,7 @@ async function start() {
         
         Matrix.ev.on('creds.update', saveCreds);
 
-        // FIXED: Message handling
+        // CRITICAL: Message handling - ensure commands work
         Matrix.ev.on("messages.upsert", async (chatUpdate) => {
             try {
                 const mek = chatUpdate.messages[0];
@@ -273,24 +283,23 @@ async function start() {
                 
                 // Log incoming message (except from self)
                 if (!isFromMe) {
-                    // Log only important message types
-                    if (type === 'conversation') {
-                        const text = mek.message.conversation || '';
-                        logger.info(`Message from ${from}: "${text.substring(0, 30)}${text.length > 30 ? '...' : ''}"`);
+                    // Extract text for logging
+                    let text = '';
+                    if (mek.message.conversation) {
+                        text = mek.message.conversation;
+                    } else if (mek.message.extendedTextMessage?.text) {
+                        text = mek.message.extendedTextMessage.text;
+                    }
+                    
+                    if (text) {
+                        logger.info(`📩 Message from ${from.split('@')[0]}: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
                         
                         // Check if it's a command
                         if (text.startsWith(prefix)) {
-                            logger.info(`Command detected: ${text}`);
-                        }
-                    } else if (type === 'extendedTextMessage') {
-                        const text = mek.message.extendedTextMessage?.text || '';
-                        logger.info(`Extended message from ${from}: "${text.substring(0, 30)}${text.length > 30 ? '...' : ''}"`);
-                        
-                        if (text.startsWith(prefix)) {
-                            logger.info(`Command detected: ${text}`);
+                            logger.info(`🎯 Command detected: ${text}`);
                         }
                     } else {
-                        logger.debug(`Message type ${type} from ${from}`);
+                        logger.debug(`Message type ${type} from ${from.split('@')[0]}`);
                     }
                 }
                 
@@ -303,14 +312,18 @@ async function start() {
                 if (mek.message?.protocolMessage?.type === 7) {
                     const deletedKey = mek.message.protocolMessage.key;
                     if (deletedKey) {
-                        logger.info(`Message deleted: ${deletedKey.id}`);
+                        logger.info(`🗑️ Message deleted: ${deletedKey.id}`);
                         await handleDeletedMessage(Matrix, { key: deletedKey });
                     }
                 }
                 
-                // PASS TO COMMAND HANDLER - THIS IS CRITICAL
-                logger.debug('Passing to Handler...');
-                await Handler(chatUpdate, Matrix, logger);
+                // PASS TO COMMAND HANDLER - THIS IS WHERE COMMANDS ARE PROCESSED
+                logger.debug('Passing message to Handler...');
+                try {
+                    await Handler(chatUpdate, Matrix, baileysLogger);
+                } catch (handlerError) {
+                    logger.error('Handler error:', handlerError);
+                }
                 
             } catch (error) {
                 logger.error(`Error in messages.upsert: ${error.message}`);
@@ -549,7 +562,7 @@ app.get('/', (req, res) => {
     logger.info('Web request received');
     res.send(`
         <h1>Vectra-XMD WhatsApp Bot</h1>
-        <p>Status: Running</p>
+        <p>Status: ${initialConnection ? 'Starting...' : 'Running'}</p>
         <p>Mode: ${config.MODE || 'public'}</p>
         <p>Prefix: ${prefix}</p>
         <p>Bot Name: ${config.BOT_NAME || 'Buddy-XTR'}</p>
