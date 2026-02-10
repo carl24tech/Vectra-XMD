@@ -23,7 +23,7 @@ const config = {
   MENU_IMAGE: process.env.MENU_IMAGE || "https://files.catbox.moe/7l1rr5.jpg",
   DESCRIPTION: process.env.DESCRIPTION || "Vectra",
   OWNER_NAME: process.env.OWNER_NAME || "Vectra team",
-  OWNER_NUMBER: process.env.OWNER_NUMBER || "0740271236",
+  OWNER_NUMBER: process.env.OWNER_NUMBER || "0717640862",
   GEMINI_KEY: process.env.GEMINI_KEY || "AIzaSyCUPaxfIdZawsKZKqCqJcC-GWiQPCXKTDc",
   WELCOME: process.env.WELCOME !== undefined ? process.env.WELCOME === 'true' : false, 
   
